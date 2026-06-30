@@ -1,4 +1,4 @@
-from typing import Callable
+from collections.abc import Callable
 
 from app.jobs.handlers import handle_email, handle_report, handle_webhook
 from app.schemas.enums import JobType

@@ -27,7 +27,7 @@ The FastAPI routes for `POST /jobs`, `GET /jobs/{id}`, and `GET /jobs` (with cur
 1. **Claim-guard correctness (Task 11, worker dispatch):**
    - AI initially generated a check for `job.status == "pending"` but placed it *after* message dequeue, not atomically with the update.
    - **Problem:** A redelivered message could pass the check, then lose a race with another worker updating the job, resulting in lost updates or duplicate processing.
-   - **Fix:** Wrapped the check in a `SELECT ... FOR UPDATE` lock *before* running the handler, ensuring atomic read-and-update.
+   - **Fix:** Replaced the check with a conditional `UPDATE jobs SET status='processing', started_at=NOW() WHERE id=:id AND status='pending'`, which returns `rowcount == 1` if and only if the claim succeeded. This is an atomic optimistic update — no lock needed, no race possible.
 
 2. **Ack-after-commit ordering (Task 11, worker dispatch):**
    - AI generated the order as: run handler → `XACK` → commit (to Redis first, then DB).
