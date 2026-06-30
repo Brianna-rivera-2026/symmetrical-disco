@@ -17,6 +17,8 @@ def test_job_table_and_columns():
         "created_at",
         "started_at",
         "completed_at",
+        "scheduled_at",
+        "is_synced_to_redis",
     }
 
 

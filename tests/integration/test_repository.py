@@ -57,3 +57,22 @@ def test_list_filters_and_cursor(db_session):
     assert cursor2 is None
     ids = {j.id for j in page1} | {j.id for j in page2}
     assert len(ids) == 4
+
+
+def test_job_has_scheduling_columns(db_session):
+    from datetime import datetime, timezone
+
+    from app.models.job import Job
+
+    when = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    job = Job(
+        type=JobType.email,
+        payload={"to": "a@b.com", "subject": "Hi"},
+        status=JobStatus.scheduled,
+        scheduled_at=when,
+    )
+    db_session.add(job)
+    db_session.commit()
+    db_session.refresh(job)
+    assert job.scheduled_at == when
+    assert job.is_synced_to_redis is False

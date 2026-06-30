@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Enum as SAEnum
+import sqlalchemy as sa
+from sqlalchemy import Boolean, Enum as SAEnum
 from sqlalchemy import TIMESTAMP, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -33,6 +34,12 @@ class Job(Base):
     )
     completed_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True
+    )
+    scheduled_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    is_synced_to_redis: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sa.false()
     )
 
     def __init__(self, **kwargs: object) -> None:
