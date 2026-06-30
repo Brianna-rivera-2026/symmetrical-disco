@@ -1,7 +1,7 @@
-import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from pydantic import ValidationError
 
 from app.api.routes import router
 from app.core.config import Settings, get_settings
@@ -34,4 +34,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-app = create_app() if os.getenv("DATABASE_URL") else None  # type: ignore[assignment]
+try:
+    app = create_app()
+except ValidationError:
+    app = None  # type: ignore[assignment]
