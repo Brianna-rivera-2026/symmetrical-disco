@@ -11,6 +11,12 @@ class Settings(BaseSettings):
     jobs_stream: str = "jobs:stream"
     consumer_group: str = "workers"
     block_ms: int = 5000
+    delayed_zset: str = "jobs:delayed"
+    ticker_interval_s: float = 1.0
+    ticker_batch_size: int = 100
+    reconcile_interval_s: float = 60.0
+    reconcile_grace_s: float = 10.0
+    reconcile_batch_size: int = 500
     log_level: str = "INFO"
 
 
