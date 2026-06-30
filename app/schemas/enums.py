@@ -1,0 +1,16 @@
+from enum import Enum
+
+
+class JobType(str, Enum):
+    email = "email"
+    webhook = "webhook"
+    report = "report"
+
+
+class JobStatus(str, Enum):
+    scheduled = "scheduled"
+    pending = "pending"
+    processing = "processing"
+    completed = "completed"
+    failed = "failed"
+    cancelled = "cancelled"
