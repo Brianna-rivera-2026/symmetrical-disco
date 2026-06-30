@@ -43,6 +43,11 @@ def reconcile_orphans(session: Session, client: redis.Redis, settings: Settings)
             break
         for job in rows:
             if job.status is JobStatus.scheduled:
+                if job.scheduled_at is None:
+                    log.warning(
+                        "ticker.reconcile_skipped_null_scheduled_at", job_id=str(job.id)
+                    )
+                    continue
                 delayed.schedule(
                     client,
                     settings.delayed_zset,

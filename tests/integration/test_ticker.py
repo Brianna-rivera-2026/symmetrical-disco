@@ -142,3 +142,76 @@ def test_run_forever_promotes_then_stops(redis_client, test_settings, pg_engine)
         refreshed = repo.get_job(s, job.id)
     assert refreshed.status is JobStatus.pending
     assert redis_client.xlen(settings.jobs_stream) == 1
+
+
+def test_end_to_end_scheduled_job_completes(
+    db_session, redis_client, test_settings, pg_engine
+):
+    """Submit a scheduled job, promote it, then process it — asserts completed status."""
+    from app.queue.consumer import ensure_group
+
+    from app.worker.runner import process_job
+
+    ensure_group(redis_client, test_settings.jobs_stream, test_settings.consumer_group)
+    when = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    job = repo.create_job(
+        db_session,
+        JobType.email,
+        {"to": "a@b.com", "subject": "Hi"},
+        status=JobStatus.scheduled,
+        scheduled_at=when,
+    )
+    delayed.schedule(
+        redis_client, test_settings.delayed_zset, str(job.id), when.timestamp()
+    )
+
+    promote_due(db_session, redis_client, test_settings)
+
+    factory = make_session_factory(pg_engine)
+    with factory() as s:
+        process_job(s, job.id)
+        refreshed = repo.get_job(s, job.id)
+    assert refreshed.status is JobStatus.completed
+
+
+def test_duplicate_promotion_second_claim_is_noop(
+    db_session, redis_client, test_settings, pg_engine
+):
+    """Promote the same job twice; second worker claim must be a no-op."""
+    from app.queue.consumer import ensure_group
+
+    from app.worker.runner import process_job
+
+    ensure_group(redis_client, test_settings.jobs_stream, test_settings.consumer_group)
+    when = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    job = repo.create_job(
+        db_session,
+        JobType.email,
+        {"to": "a@b.com", "subject": "Hi"},
+        status=JobStatus.scheduled,
+        scheduled_at=when,
+    )
+    # Manually add the job to the ZSET twice to simulate a crash-recovery re-promotion.
+    delayed.schedule(
+        redis_client, test_settings.delayed_zset, str(job.id), when.timestamp()
+    )
+    promote_due(db_session, redis_client, test_settings)
+
+    # Re-add to ZSET and promote again (simulates ticker crash between XADD and ZREM).
+    delayed.schedule(
+        redis_client, test_settings.delayed_zset, str(job.id), when.timestamp()
+    )
+    promote_due(db_session, redis_client, test_settings)
+
+    # Stream has 2 entries for the same job; process both.
+    factory = make_session_factory(pg_engine)
+    with factory() as s:
+        process_job(s, job.id)  # First delivery: claim succeeds, job completes.
+        first_result = repo.get_job(s, job.id).result
+
+    with factory() as s:
+        process_job(s, job.id)  # Second delivery: claim guard rejects, no-op.
+        refreshed = repo.get_job(s, job.id)
+
+    assert refreshed.status is JobStatus.completed
+    assert refreshed.result == first_result  # Result unchanged by duplicate.
