@@ -1,9 +1,15 @@
 import json
 import logging
 
+import pytest
 import structlog
 
 from app.core.logging import configure_logging
+
+
+@pytest.fixture(autouse=True)
+def _reset_structlog():
+    structlog.reset_defaults()
 
 
 def test_configure_logging_emits_json_with_context(capsys):
