@@ -3,9 +3,10 @@ from datetime import datetime, timezone
 from sqlalchemy import text
 
 from app import repository as repo
+from app.core.db import make_session_factory
 from app.queue import delayed
 from app.schemas.enums import JobStatus, JobType
-from app.ticker.runner import promote_due, reconcile_orphans
+from app.ticker.runner import promote_due, reconcile_orphans, run_forever
 
 
 def test_promote_due_moves_mature_job(db_session, redis_client, test_settings):
@@ -109,3 +110,35 @@ def test_reconcile_respects_grace_for_recent_jobs(
 
     assert recovered == 0
     assert redis_client.xlen(test_settings.jobs_stream) == 0
+
+
+def test_run_forever_promotes_then_stops(redis_client, test_settings, pg_engine):
+    settings = test_settings.model_copy(
+        update={"ticker_interval_s": 0.01, "reconcile_interval_s": 0.01}
+    )
+    when = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    factory = make_session_factory(pg_engine)
+    with factory() as s:
+        job = repo.create_job(
+            s,
+            JobType.email,
+            {"to": "a@b.com", "subject": "Hi"},
+            status=JobStatus.scheduled,
+            scheduled_at=when,
+        )
+    delayed.schedule(redis_client, settings.delayed_zset, str(job.id), when.timestamp())
+
+    calls = {"n": 0}
+
+    def stop() -> bool:
+        if calls["n"] >= 1:
+            return True
+        calls["n"] += 1
+        return False
+
+    run_forever(settings, stop=stop)
+
+    with factory() as s:
+        refreshed = repo.get_job(s, job.id)
+    assert refreshed.status is JobStatus.pending
+    assert redis_client.xlen(settings.jobs_stream) == 1
