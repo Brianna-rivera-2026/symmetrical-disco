@@ -3,8 +3,10 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import text
 from testcontainers.postgres import PostgresContainer
+from testcontainers.redis import RedisContainer
 
 from app.core.db import make_engine, make_session_factory
+from app.core.redis import create_redis_client
 
 
 @pytest.fixture(scope="session")
@@ -39,3 +41,18 @@ def db_session(pg_engine):
         session.close()
         with pg_engine.begin() as conn:
             conn.execute(text("TRUNCATE TABLE jobs"))
+
+
+@pytest.fixture(scope="session")
+def redis_container():
+    with RedisContainer("redis:7") as rc:
+        yield rc
+
+
+@pytest.fixture
+def redis_client(redis_container):
+    url = f"redis://{redis_container.get_container_host_ip()}:{redis_container.get_exposed_port(6379)}/0"
+    client = create_redis_client(url)
+    yield client
+    client.flushdb()
+    client.close()
