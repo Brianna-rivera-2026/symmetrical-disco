@@ -115,3 +115,51 @@ def test_job_has_scheduling_columns(db_session):
     db_session.refresh(job)
     assert job.scheduled_at == when
     assert job.is_synced_to_redis is False
+
+
+def test_promote_scheduled_to_pending_only_scheduled(db_session):
+    from datetime import datetime, timezone
+
+    when = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    scheduled = repo.create_job(
+        db_session,
+        JobType.email,
+        {"to": "a@b.com", "subject": "Hi"},
+        status=JobStatus.scheduled,
+        scheduled_at=when,
+    )
+    already_pending = repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}
+    )
+    changed = repo.promote_scheduled_to_pending(
+        db_session, [scheduled.id, already_pending.id]
+    )
+    assert changed == 1
+    db_session.refresh(scheduled)
+    assert scheduled.status is JobStatus.pending
+
+
+def test_list_unsynced_filters_synced_and_grace(db_session):
+    from datetime import datetime, timedelta, timezone
+
+    synced = repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}
+    )
+    repo.mark_synced(db_session, synced.id)
+    orphan = repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}
+    )
+    now = datetime.now(timezone.utc)
+
+    rows = repo.list_unsynced(
+        db_session, older_than=now + timedelta(seconds=1), limit=100
+    )
+    ids = {r.id for r in rows}
+    assert orphan.id in ids
+    assert synced.id not in ids
+
+    # Grace window: nothing is old enough when the cutoff is in the past.
+    none_rows = repo.list_unsynced(
+        db_session, older_than=now - timedelta(seconds=1000), limit=100
+    )
+    assert none_rows == []

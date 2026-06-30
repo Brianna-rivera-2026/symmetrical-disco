@@ -94,3 +94,29 @@ def fail_job(session: Session, job_id: UUID, error: dict) -> None:
         .values(status=JobStatus.failed, error=error, completed_at=_now())
     )
     session.commit()
+
+
+def promote_scheduled_to_pending(session: Session, job_ids: list[UUID]) -> int:
+    if not job_ids:
+        return 0
+    result = session.execute(
+        update(Job)
+        .where(Job.id.in_(job_ids), Job.status == JobStatus.scheduled)
+        .values(status=JobStatus.pending)
+    )
+    session.commit()
+    return result.rowcount
+
+
+def list_unsynced(session: Session, *, older_than: datetime, limit: int) -> list[Job]:
+    stmt = (
+        select(Job)
+        .where(
+            Job.is_synced_to_redis.is_(False),
+            Job.status.in_([JobStatus.pending, JobStatus.scheduled]),
+            Job.created_at < older_than,
+        )
+        .order_by(Job.created_at, Job.id)
+        .limit(limit)
+    )
+    return list(session.execute(stmt).scalars())
