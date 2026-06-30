@@ -1,0 +1,35 @@
+import uuid
+from datetime import datetime
+
+from sqlalchemy import Enum as SAEnum
+from sqlalchemy import func
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.models.base import Base
+from app.schemas.enums import JobStatus, JobType
+
+
+class Job(Base):
+    __tablename__ = "jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    type: Mapped[JobType] = mapped_column(SAEnum(JobType, name="job_type"))
+    payload: Mapped[dict] = mapped_column(JSONB)
+    status: Mapped[JobStatus] = mapped_column(
+        SAEnum(JobStatus, name="job_status"),
+        default=JobStatus.pending,
+        index=True,
+    )
+    result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    def __init__(self, **kwargs: object) -> None:
+        kwargs.setdefault("id", uuid.uuid4())
+        kwargs.setdefault("status", JobStatus.pending)
+        super().__init__(**kwargs)
