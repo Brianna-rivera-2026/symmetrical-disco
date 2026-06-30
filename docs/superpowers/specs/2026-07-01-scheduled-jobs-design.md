@@ -115,17 +115,42 @@ New entrypoint `python -m app.ticker` and `runner.run_forever(settings, *, stop=
 mirroring the worker: SIGTERM/SIGINT graceful stop, structlog context, testable
 `stop` hook.
 
-### 7.1 Promotion tick (every `ticker_interval_s`, default 1.0s)
+### 7.1 Promotion tick — drain loop
+
+The loop must **not** simply sleep `ticker_interval_s` between single batches:
+that caps promotion at `ticker_batch_size` jobs per interval (100/s by default),
+so 10,000 jobs scheduled for the same instant would take ~100s to promote —
+artificial execution lag (a self-inflicted thundering herd). Instead each
+iteration:
 
 1. `ids = ZRANGEBYSCORE jobs:delayed 0 <now_epoch> LIMIT 0 <ticker_batch_size>`
-2. For each `id` (**Approach B — `XADD` before `ZREM`**):
-   1. `XADD jobs:stream {job_id: id}`
-   2. `ZREM jobs:delayed id`
-   3. best-effort `UPDATE jobs SET status='pending' WHERE id=:id AND status='scheduled'`
-      (rowcount 0 is fine — a worker may have already claimed it; see §8).
+2. If `ids` is empty → sleep `ticker_interval_s`, then continue.
+3. Otherwise promote the batch (below). If `len(ids) == ticker_batch_size`
+   (full batch → backlog likely remains) **loop again immediately, skipping the
+   sleep**; if partial, sleep `ticker_interval_s`.
 
-A crash between step 2.1 and 2.2 leaves the id in the ZSET → re-promoted next
-tick → duplicate stream message → second worker claim is a no-op. No loss.
+This drains a mature backlog at one batch per round-trip set instead of one batch
+per second. We deliberately keep `ticker_batch_size` *moderate* rather than huge:
+a giant `ZRANGEBYSCORE`/`XADD` would block Redis's single thread and delay
+workers' `XREADGROUP`/`XACK` — the same single-thread fairness concern as the
+reconciler. The drain loop gives high aggregate throughput without large blocking
+commands.
+
+**Promoting a batch (Approach B — `XADD` before `ZREM`, batched):**
+1. Pipeline `XADD jobs:stream {job_id}` for every id; execute.
+2. `ZREM jobs:delayed id1 id2 …` (single multi-member call).
+3. best-effort bulk `UPDATE jobs SET status='pending'
+   WHERE id = ANY(:ids) AND status='scheduled'` (rows already claimed by a worker
+   are skipped; see §8).
+
+All `XADD`s are issued before any `ZREM`, so a crash between steps 1 and 2 leaves
+the ids in the ZSET → re-promoted next iteration → duplicate stream message →
+second worker claim is a no-op. The pipeline is ordered but need not be atomic.
+
+**Guard rails:** the stop flag is checked every iteration so SIGTERM/SIGINT is
+honored promptly even under a sustained drain; the reconciler (§7.2) runs on a
+wall-clock cadence (`now - last_reconcile >= reconcile_interval_s`) so a busy
+drain loop never starves it.
 
 ### 7.2 Reconciler (every `reconcile_interval_s`, default 60s)
 
@@ -183,6 +208,7 @@ idempotent — a second claim returns rowcount 0 and is skipped.
 | `scheduled_at` in the past / naive tz | Past → immediate; naive → interpreted as UTC. |
 | Redis unavailable for a tick | Tick logs and returns; ZSET is durable; next tick retries. |
 | Clock skew (ticker host vs scheduled time) | Promotion uses host clock vs ZSET score; acceptable, documented. |
+| Large batch scheduled for the same instant | Drain loop (§7.1) promotes back-to-back batches with no 1s-per-batch cap; no artificial lag, while individual Redis commands stay small. |
 
 **Durability assumption (decision a):** Redis is configured durable (AOF
 `appendfsync everysec` + RDB). The sync flag tracks "handed off to Redis once,"
