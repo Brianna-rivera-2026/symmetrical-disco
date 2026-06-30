@@ -3,7 +3,9 @@ def test_health(client):
 
 
 def test_submit_creates_job_and_enqueues(client):
-    resp = client.post("/jobs", json={"type": "email", "payload": {"to": "a@b.com", "subject": "Hi"}})
+    resp = client.post(
+        "/jobs", json={"type": "email", "payload": {"to": "a@b.com", "subject": "Hi"}}
+    )
     assert resp.status_code == 202
     body = resp.json()
     assert body["status"] == "pending"
@@ -21,7 +23,9 @@ def test_submit_creates_job_and_enqueues(client):
 
 
 def test_submit_rejects_bad_payload(client):
-    resp = client.post("/jobs", json={"type": "email", "payload": {"subject": "no recipient"}})
+    resp = client.post(
+        "/jobs", json={"type": "email", "payload": {"subject": "no recipient"}}
+    )
     assert resp.status_code == 422
 
 
@@ -37,7 +41,9 @@ def test_get_missing_returns_404(client):
 
 
 def test_list_filters_by_type(client):
-    client.post("/jobs", json={"type": "email", "payload": {"to": "a@b.com", "subject": "Hi"}})
+    client.post(
+        "/jobs", json={"type": "email", "payload": {"to": "a@b.com", "subject": "Hi"}}
+    )
     client.post("/jobs", json={"type": "report", "payload": {"report_type": "sales"}})
     resp = client.get("/jobs", params={"type": "email"})
     assert resp.status_code == 200

@@ -20,7 +20,9 @@ def test_process_job_completes_email(db_session):
 
 
 def test_process_job_marks_failure(db_session, monkeypatch):
-    monkeypatch.setattr(handlers.random, "random", lambda: 0.05)  # force webhook failure
+    monkeypatch.setattr(
+        handlers.random, "random", lambda: 0.05
+    )  # force webhook failure
     job = repo.create_job(db_session, JobType.webhook, {"url": "https://x.test"})
     process_job(db_session, job.id)
     db_session.refresh(job)

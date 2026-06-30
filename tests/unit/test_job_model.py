@@ -8,8 +8,15 @@ def test_job_table_and_columns():
     assert Job.__tablename__ == "jobs"
     cols = set(Job.__table__.columns.keys())
     assert cols == {
-        "id", "type", "payload", "status", "result", "error",
-        "created_at", "started_at", "completed_at",
+        "id",
+        "type",
+        "payload",
+        "status",
+        "result",
+        "error",
+        "created_at",
+        "started_at",
+        "completed_at",
     }
 
 

@@ -35,7 +35,9 @@ def submit_job(
     job = repo.create_job(session, submission.type, submission.payload)
     # Enqueue invariant: XADD only after create_job() committed the INSERT.
     enqueue(client, request.app.state.settings.jobs_stream, str(job.id))
-    return JobAccepted(id=job.id, type=job.type, status=job.status, created_at=job.created_at)
+    return JobAccepted(
+        id=job.id, type=job.type, status=job.status, created_at=job.created_at
+    )
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut)
@@ -60,4 +62,6 @@ def list_jobs(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid cursor") from exc
-    return JobList(items=[JobOut.model_validate(j) for j in jobs], next_cursor=next_cursor)
+    return JobList(
+        items=[JobOut.model_validate(j) for j in jobs], next_cursor=next_cursor
+    )
