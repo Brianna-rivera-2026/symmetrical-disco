@@ -1,12 +1,15 @@
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi.testclient import TestClient
 from sqlalchemy import text
 from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
 
+from app.core.config import Settings
 from app.core.db import make_engine, make_session_factory
 from app.core.redis import create_redis_client
+from app.main import create_app
 
 
 @pytest.fixture(scope="session")
@@ -56,3 +59,18 @@ def redis_client(redis_container):
     yield client
     client.flushdb()
     client.close()
+
+
+@pytest.fixture
+def test_settings(database_url, redis_container) -> Settings:
+    redis_url = f"redis://{redis_container.get_container_host_ip()}:{redis_container.get_exposed_port(6379)}/0"
+    return Settings(database_url=database_url, redis_url=redis_url)
+
+
+@pytest.fixture
+def client(pg_engine, test_settings):
+    app = create_app(test_settings)
+    with TestClient(app) as c:
+        yield c
+    with pg_engine.begin() as conn:
+        conn.execute(text("TRUNCATE TABLE jobs"))
