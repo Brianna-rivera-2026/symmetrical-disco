@@ -37,8 +37,9 @@ def process_job(
     job = repo.get_job(session, job_id)
     try:
         payload = validate_payload(job.type, job.payload)
+        # TODO(Task 6): pass a real JobContext instead of None once PgJobContext exists.
         result = run_with_timeout(
-            lambda: run_handler(job.type, payload), settings.job_handler_timeout_s
+            lambda: run_handler(job.type, payload, None), settings.job_handler_timeout_s
         )
     except HandlerTimeout:
         won = schedule_retry_or_fail(
