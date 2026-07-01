@@ -68,6 +68,7 @@ dev = [
     { name = "fakeredis" },
     { name = "httpx" },
     { name = "pytest" },
+    { name = "pyyaml" },
     { name = "ruff" },
     { name = "testcontainers" },
 ]
@@ -90,6 +91,7 @@ dev = [
     { name = "fakeredis", specifier = ">=2.36.2" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "ruff", specifier = ">=0.15.20" },
     { name = "testcontainers", specifier = ">=4.14.2" },
 ]
