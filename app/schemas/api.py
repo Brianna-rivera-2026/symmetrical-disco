@@ -65,3 +65,24 @@ class HealthChecks(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     checks: HealthChecks
+
+
+class StreamStat(BaseModel):
+    depth: int | None
+    in_flight: int
+
+
+class QueueStats(BaseModel):
+    streams: dict[str, StreamStat]
+    scheduled: int
+    workers: int
+
+
+class JobStats(BaseModel):
+    by_status: dict[str, int]
+    oldest_pending_age_seconds: float | None
+
+
+class StatsResponse(BaseModel):
+    queue: QueueStats
+    jobs: JobStats

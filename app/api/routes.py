@@ -2,16 +2,17 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 import redis
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app import repository as repo
 from app.api.deps import get_db, get_redis
 from app.idempotency import canonical_hash
-from app.observability import check_readiness
+from app.observability import check_readiness, gather_stats
 from app.queue.delayed import schedule
 from app.queue.producer import enqueue
 from app.schemas.api import (
@@ -21,11 +22,13 @@ from app.schemas.api import (
     JobList,
     JobOut,
     JobSubmission,
+    StatsResponse,
 )
 from app.schemas.enums import JobPriority, JobStatus, JobType
 from app.schemas.payloads import validate_payload
 
 router = APIRouter()
+log = structlog.get_logger("api")
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -41,6 +44,20 @@ def health(
             content={"status": "unavailable", "checks": checks},
         )
     return HealthResponse(status="ok", checks=HealthChecks(**checks))
+
+
+@router.get("/stats", response_model=StatsResponse)
+def stats(
+    request: Request,
+    session: Session = Depends(get_db),
+    client: redis.Redis = Depends(get_redis),
+) -> StatsResponse:
+    settings = request.app.state.settings
+    try:
+        return gather_stats(session, client, settings)
+    except (redis.RedisError, SQLAlchemyError) as exc:
+        log.warning("stats.unavailable", error=str(exc))
+        raise HTTPException(status_code=503, detail="stats unavailable") from exc
 
 
 def _create_and_handoff(session, client, settings, submission, key, req_hash):

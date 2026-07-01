@@ -1,10 +1,13 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 import redis
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.core.config import Settings
+from app.models.job import Job
+from app.schemas.api import JobStats, QueueStats, StatsResponse, StreamStat
 from app.schemas.enums import JobStatus
 
 
@@ -55,3 +58,72 @@ def check_readiness(session: Session, client: redis.Redis) -> dict[str, str]:
     except redis.RedisError:
         checks["redis"] = "error"
     return checks
+
+
+def _tolerate_nogroup(result, empty):
+    """In a pipeline run with raise_on_error=False, a missing stream/group comes
+    back as a NOGROUP ResponseError -> treat as empty. Any other error is real
+    and re-raised (caller turns it into a 503)."""
+    if isinstance(result, redis.ResponseError) and "NOGROUP" in str(result):
+        return empty
+    if isinstance(result, Exception):
+        raise result
+    return result
+
+
+def gather_stats(
+    session: Session, client: redis.Redis, settings: Settings
+) -> StatsResponse:
+    stream_names = [stream for _, stream in settings.priority_streams]
+    n = len(stream_names)
+
+    pipe = client.pipeline(transaction=False)
+    for stream in stream_names:
+        pipe.xinfo_groups(stream)
+    for stream in stream_names:
+        pipe.xinfo_consumers(stream, settings.consumer_group)
+    pipe.zcard(settings.delayed_zset)
+    results = pipe.execute(raise_on_error=False)
+
+    groups = [_tolerate_nogroup(res, []) for res in results[:n]]
+    consumers = [_tolerate_nogroup(res, []) for res in results[n : 2 * n]]
+    scheduled = int(_tolerate_nogroup(results[2 * n], 0))
+
+    streams: dict[str, StreamStat] = {}
+    for (priority, _), group_list in zip(settings.priority_streams, groups):
+        group = next(
+            (g for g in group_list if g.get("name") == settings.consumer_group),
+            None,
+        )
+        if group is None:
+            streams[priority.value] = StreamStat(depth=0, in_flight=0)
+            continue
+        lag = group.get("lag")
+        # lag is only nil after entries are XDEL'd, which this system never does,
+        # so in practice it is always an int; fall back to null defensively.
+        streams[priority.value] = StreamStat(
+            depth=int(lag) if lag is not None else None,
+            in_flight=int(group["pending"]),
+        )
+
+    cutoff_ms = int(settings.visibility_timeout_s * 1000)
+    queue = QueueStats(
+        streams=streams,
+        scheduled=scheduled,
+        workers=live_worker_count(consumers, cutoff_ms),
+    )
+
+    status_rows = session.execute(
+        select(Job.status, func.count()).group_by(Job.status)
+    ).all()
+    min_created = session.execute(
+        select(func.min(Job.created_at)).where(Job.status == JobStatus.pending)
+    ).scalar_one()
+    jobs = JobStats(
+        by_status=zero_fill_status_counts(status_rows),
+        oldest_pending_age_seconds=pending_age_seconds(
+            min_created, datetime.now(timezone.utc)
+        ),
+    )
+
+    return StatsResponse(queue=queue, jobs=jobs)

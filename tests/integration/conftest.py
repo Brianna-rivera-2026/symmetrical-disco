@@ -74,3 +74,11 @@ def client(pg_engine, test_settings):
         yield c
     with pg_engine.begin() as conn:
         conn.execute(text("TRUNCATE TABLE jobs"))
+    # Some tests swap app.state.redis for a broken client to simulate an outage;
+    # flush the real backing instance directly so teardown never depends on
+    # whatever connection a test left in place.
+    real_redis = create_redis_client(test_settings.redis_url)
+    try:
+        real_redis.flushdb()
+    finally:
+        real_redis.close()
