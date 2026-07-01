@@ -27,9 +27,18 @@ def promote_due(session: Session, client: redis.Redis, settings: Settings) -> in
     )
     if not ids:
         return 0
-    delayed.promote(client, settings.jobs_stream, settings.delayed_zset, ids)
+    priorities = repo.get_priorities(session, [UUID(i) for i in ids])
+    routed: list[tuple[str, str]] = []
+    for i in ids:
+        prio = priorities.get(UUID(i))
+        if prio is None:
+            # No scheduled row (cancelled/deleted): drop it — do not enqueue —
+            # but it is still ZREM'd below so it can't re-accumulate.
+            continue
+        routed.append((settings.stream_for_priority(prio), i))
+    delayed.promote(client, settings.delayed_zset, routed, ids)
     repo.promote_scheduled_to_pending(session, [UUID(i) for i in ids])
-    log.info("ticker.promoted", count=len(ids), job_ids=ids)
+    log.info("ticker.promoted", enqueued=len(routed), pulled=len(ids))
     return len(ids)
 
 
@@ -56,7 +65,11 @@ def reconcile_orphans(session: Session, client: redis.Redis, settings: Settings)
                     job.scheduled_at.timestamp(),
                 )
             else:
-                enqueue(client, settings.jobs_stream, str(job.id))
+                enqueue(
+                    client,
+                    settings.stream_for_priority(job.priority),
+                    str(job.id),
+                )
             repo.mark_synced(session, job.id)
             total += 1
         if len(rows) < settings.reconcile_batch_size:
@@ -70,7 +83,8 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
     client = create_redis_client(settings.redis_url)
     # Make sure the consumer group exists before we XADD, so workers created
     # later (group id "$") don't miss jobs the ticker has already promoted.
-    ensure_group(client, settings.jobs_stream, settings.consumer_group)
+    for stream in settings.ordered_streams:
+        ensure_group(client, stream, settings.consumer_group)
 
     shutting_down = {"flag": False}
 
@@ -83,7 +97,9 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
     def _should_stop() -> bool:
         return shutting_down["flag"] or (stop() if stop else False)
 
-    log.info("ticker.started", zset=settings.delayed_zset, stream=settings.jobs_stream)
+    log.info(
+        "ticker.started", zset=settings.delayed_zset, streams=settings.ordered_streams
+    )
     last_reconcile = 0.0
 
     while not _should_stop():

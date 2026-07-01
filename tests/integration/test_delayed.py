@@ -23,11 +23,30 @@ def test_due_respects_limit(redis_client):
 def test_promote_moves_ids_to_stream_and_removes(redis_client):
     delayed.schedule(redis_client, ZSET, "a", time.time() - 1)
     delayed.schedule(redis_client, ZSET, "b", time.time() - 1)
-    delayed.promote(redis_client, STREAM, ZSET, ["a", "b"])
+    delayed.promote(
+        redis_client,
+        ZSET,
+        [(STREAM, "a"), (STREAM, "b")],
+        ["a", "b"],
+    )
     assert redis_client.xlen(STREAM) == 2
     assert redis_client.zcard(ZSET) == 0
 
 
+def test_promote_routes_to_multiple_streams(redis_client):
+    delayed.schedule(redis_client, ZSET, "a", time.time() - 1)
+    delayed.schedule(redis_client, ZSET, "b", time.time() - 1)
+    delayed.promote(
+        redis_client,
+        ZSET,
+        [("s:high", "a"), ("s:low", "b")],
+        ["a", "b"],
+    )
+    assert redis_client.xlen("s:high") == 1
+    assert redis_client.xlen("s:low") == 1
+    assert redis_client.zcard(ZSET) == 0
+
+
 def test_promote_empty_is_noop(redis_client):
-    delayed.promote(redis_client, STREAM, ZSET, [])
+    delayed.promote(redis_client, ZSET, [], [])
     assert redis_client.xlen(STREAM) == 0

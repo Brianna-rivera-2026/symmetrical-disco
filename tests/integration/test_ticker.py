@@ -25,7 +25,7 @@ def test_promote_due_moves_mature_job(db_session, redis_client, test_settings):
     promoted = promote_due(db_session, redis_client, test_settings)
 
     assert promoted == 1
-    assert redis_client.xlen(test_settings.jobs_stream) == 1
+    assert redis_client.xlen(test_settings.stream_normal) == 1
     assert redis_client.zcard(test_settings.delayed_zset) == 0
     db_session.refresh(job)
     assert job.status is JobStatus.pending
@@ -47,7 +47,7 @@ def test_promote_due_skips_future(db_session, redis_client, test_settings):
     promoted = promote_due(db_session, redis_client, test_settings)
 
     assert promoted == 0
-    assert redis_client.xlen(test_settings.jobs_stream) == 0
+    assert redis_client.xlen(test_settings.stream_normal) == 0
     assert redis_client.zcard(test_settings.delayed_zset) == 1
 
 
@@ -66,7 +66,7 @@ def test_reconcile_reenqueues_pending_orphan(db_session, redis_client, test_sett
     recovered = reconcile_orphans(db_session, redis_client, test_settings)
 
     assert recovered == 1
-    assert redis_client.xlen(test_settings.jobs_stream) == 1
+    assert redis_client.xlen(test_settings.stream_normal) == 1
     db_session.refresh(job)
     assert job.is_synced_to_redis is True
 
@@ -98,7 +98,7 @@ def test_reconcile_noop_when_synced(db_session, redis_client, test_settings):
     recovered = reconcile_orphans(db_session, redis_client, test_settings)
 
     assert recovered == 0
-    assert redis_client.xlen(test_settings.jobs_stream) == 0
+    assert redis_client.xlen(test_settings.stream_normal) == 0
 
 
 def test_reconcile_respects_grace_for_recent_jobs(
@@ -109,7 +109,7 @@ def test_reconcile_respects_grace_for_recent_jobs(
     recovered = reconcile_orphans(db_session, redis_client, test_settings)
 
     assert recovered == 0
-    assert redis_client.xlen(test_settings.jobs_stream) == 0
+    assert redis_client.xlen(test_settings.stream_normal) == 0
 
 
 def test_run_forever_promotes_then_stops(redis_client, test_settings, pg_engine):
@@ -141,7 +141,7 @@ def test_run_forever_promotes_then_stops(redis_client, test_settings, pg_engine)
     with factory() as s:
         refreshed = repo.get_job(s, job.id)
     assert refreshed.status is JobStatus.pending
-    assert redis_client.xlen(settings.jobs_stream) == 1
+    assert redis_client.xlen(settings.stream_normal) == 1
 
 
 def test_end_to_end_scheduled_job_completes(
@@ -152,7 +152,8 @@ def test_end_to_end_scheduled_job_completes(
 
     from app.worker.runner import process_job
 
-    ensure_group(redis_client, test_settings.jobs_stream, test_settings.consumer_group)
+    for stream in test_settings.ordered_streams:
+        ensure_group(redis_client, stream, test_settings.consumer_group)
     when = datetime(2020, 1, 1, tzinfo=timezone.utc)
     job = repo.create_job(
         db_session,
@@ -182,7 +183,8 @@ def test_duplicate_promotion_second_claim_is_noop(
 
     from app.worker.runner import process_job
 
-    ensure_group(redis_client, test_settings.jobs_stream, test_settings.consumer_group)
+    for stream in test_settings.ordered_streams:
+        ensure_group(redis_client, stream, test_settings.consumer_group)
     when = datetime(2020, 1, 1, tzinfo=timezone.utc)
     job = repo.create_job(
         db_session,
@@ -215,3 +217,28 @@ def test_duplicate_promotion_second_claim_is_noop(
 
     assert refreshed.status is JobStatus.completed
     assert refreshed.result == first_result  # Result unchanged by duplicate.
+
+
+def test_promote_due_routes_by_priority(db_session, redis_client, test_settings):
+    from app.schemas.enums import JobPriority
+
+    when = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    high = repo.create_job(
+        db_session,
+        JobType.email,
+        {"to": "a@b.com", "subject": "Hi"},
+        status=JobStatus.scheduled,
+        scheduled_at=when,
+        priority=JobPriority.high,
+    )
+    delayed.schedule(
+        redis_client, test_settings.delayed_zset, str(high.id), when.timestamp()
+    )
+
+    promoted = promote_due(db_session, redis_client, test_settings)
+
+    assert promoted == 1
+    assert redis_client.xlen(test_settings.stream_high) == 1
+    assert redis_client.xlen(test_settings.stream_normal) == 0
+    db_session.refresh(high)
+    assert high.status is JobStatus.pending
