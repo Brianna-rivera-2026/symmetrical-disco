@@ -51,6 +51,33 @@ def test_stats_reports_queue_and_job_metrics(client, db_session):
     assert body["jobs"]["oldest_pending_age_seconds"] >= 0
 
 
+def test_stats_workers_excludes_reaper_consumer(client, db_session):
+    from app.ticker.runner import reap_stale
+
+    r = client.app.state.redis
+    s = client.app.state.settings
+    _reset_streams(r, s)
+
+    # One real worker: deliver a message to consumer "w1".
+    r.xadd(s.stream_normal, {"job_id": str(uuid4())})
+    r.xreadgroup(
+        groupname=s.consumer_group,
+        consumername="w1",
+        streams={s.stream_normal: ">"},
+        count=1,
+    )
+
+    # Run the real reaper sweep with nothing stale to reclaim. XAUTOCLAIM
+    # registers its own consumer name in the group as a side effect even when
+    # it claims zero messages, so this leaves a "reaper" consumer behind on
+    # every stream.
+    reap_stale(db_session, r, s)
+
+    body = client.get("/stats").json()
+
+    assert body["queue"]["workers"] == 1
+
+
 def test_stats_503_when_redis_down(client):
     from app.core.redis import create_redis_client
 

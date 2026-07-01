@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.models.job import Job
+from app.queue.consumer import REAPER_NAME
 from app.schemas.api import JobStats, QueueStats, StatsResponse, StreamStat
 from app.schemas.enums import JobStatus
 
@@ -86,7 +87,13 @@ def gather_stats(
     results = pipe.execute(raise_on_error=False)
 
     groups = [_tolerate_nogroup(res, []) for res in results[:n]]
-    consumers = [_tolerate_nogroup(res, []) for res in results[n : 2 * n]]
+    # XAUTOCLAIM registers its consumer name in the group even when it claims
+    # zero messages, so the ticker's reaper shows up here on every tick. It is
+    # not a job-processing worker, so exclude it before counting live workers.
+    consumers = [
+        [row for row in _tolerate_nogroup(res, []) if row.get("name") != REAPER_NAME]
+        for res in results[n : 2 * n]
+    ]
     scheduled = int(_tolerate_nogroup(results[2 * n], 0))
 
     streams: dict[str, StreamStat] = {}
