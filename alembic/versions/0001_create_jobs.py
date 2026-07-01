@@ -47,7 +47,12 @@ def upgrade() -> None:
 
     op.create_table(
         "jobs",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column(
+            "id",
+            postgresql.UUID(as_uuid=True),
+            primary_key=True,
+            server_default=sa.text("gen_random_uuid()"),
+        ),
         sa.Column("type", JOB_TYPE_REF, nullable=False),
         sa.Column("payload", postgresql.JSONB, nullable=False),
         sa.Column("status", JOB_STATUS_REF, nullable=False),
