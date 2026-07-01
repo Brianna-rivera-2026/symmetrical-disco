@@ -13,8 +13,15 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def create_job(session: Session, job_type: JobType, payload: dict) -> Job:
-    job = Job(type=job_type, payload=payload, status=JobStatus.pending)
+def create_job(
+    session: Session,
+    job_type: JobType,
+    payload: dict,
+    *,
+    status: JobStatus = JobStatus.pending,
+    scheduled_at: datetime | None = None,
+) -> Job:
+    job = Job(type=job_type, payload=payload, status=status, scheduled_at=scheduled_at)
     session.add(job)
     session.commit()
     session.refresh(job)
@@ -52,10 +59,18 @@ def list_jobs(
     return rows, next_cursor
 
 
+def mark_synced(session: Session, job_id: UUID) -> None:
+    session.execute(update(Job).where(Job.id == job_id).values(is_synced_to_redis=True))
+    session.commit()
+
+
 def claim_job(session: Session, job_id: UUID) -> bool:
     stmt = (
         update(Job)
-        .where(Job.id == job_id, Job.status == JobStatus.pending)
+        .where(
+            Job.id == job_id,
+            Job.status.in_([JobStatus.pending, JobStatus.scheduled]),
+        )
         .values(status=JobStatus.processing, started_at=_now())
     )
     result = session.execute(stmt)
@@ -79,3 +94,29 @@ def fail_job(session: Session, job_id: UUID, error: dict) -> None:
         .values(status=JobStatus.failed, error=error, completed_at=_now())
     )
     session.commit()
+
+
+def promote_scheduled_to_pending(session: Session, job_ids: list[UUID]) -> int:
+    if not job_ids:
+        return 0
+    result = session.execute(
+        update(Job)
+        .where(Job.id.in_(job_ids), Job.status == JobStatus.scheduled)
+        .values(status=JobStatus.pending)
+    )
+    session.commit()
+    return result.rowcount
+
+
+def list_unsynced(session: Session, *, older_than: datetime, limit: int) -> list[Job]:
+    stmt = (
+        select(Job)
+        .where(
+            Job.is_synced_to_redis.is_(False),
+            Job.status.in_([JobStatus.pending, JobStatus.scheduled]),
+            Job.created_at < older_than,
+        )
+        .order_by(Job.created_at, Job.id)
+        .limit(limit)
+    )
+    return list(session.execute(stmt).scalars())

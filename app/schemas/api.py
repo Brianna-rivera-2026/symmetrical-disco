@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from app.schemas.enums import JobStatus, JobType
 
@@ -9,6 +9,16 @@ from app.schemas.enums import JobStatus, JobType
 class JobSubmission(BaseModel):
     type: JobType
     payload: dict
+    scheduled_at: datetime | None = None
+
+    @field_validator("scheduled_at")
+    @classmethod
+    def _normalize_utc(cls, v: datetime | None) -> datetime | None:
+        if v is None:
+            return None
+        if v.tzinfo is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v.astimezone(timezone.utc)
 
 
 class JobAccepted(BaseModel):
@@ -16,6 +26,7 @@ class JobAccepted(BaseModel):
     type: JobType
     status: JobStatus
     created_at: datetime
+    scheduled_at: datetime | None = None
 
 
 class JobOut(BaseModel):
@@ -30,6 +41,7 @@ class JobOut(BaseModel):
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    scheduled_at: datetime | None
 
 
 class JobList(BaseModel):

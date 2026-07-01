@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from uuid import UUID
 
 import redis
@@ -7,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app import repository as repo
 from app.api.deps import get_db, get_redis
+from app.queue.delayed import schedule
 from app.queue.producer import enqueue
 from app.schemas.api import JobAccepted, JobList, JobOut, JobSubmission
 from app.schemas.enums import JobStatus, JobType
@@ -32,11 +34,30 @@ def submit_job(
     except (ValidationError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    job = repo.create_job(session, submission.type, submission.payload)
-    # Enqueue invariant: XADD only after create_job() committed the INSERT.
-    enqueue(client, request.app.state.settings.jobs_stream, str(job.id))
+    settings = request.app.state.settings
+    scheduled_at = submission.scheduled_at
+    if scheduled_at is not None and scheduled_at > datetime.now(timezone.utc):
+        # Scheduled path: persist SCHEDULED + park in the delayed ZSET.
+        job = repo.create_job(
+            session,
+            submission.type,
+            submission.payload,
+            status=JobStatus.scheduled,
+            scheduled_at=scheduled_at,
+        )
+        schedule(client, settings.delayed_zset, str(job.id), scheduled_at.timestamp())
+    else:
+        # Immediate path: persist PENDING + push to the stream.
+        job = repo.create_job(session, submission.type, submission.payload)
+        enqueue(client, settings.jobs_stream, str(job.id))
+    # Handoff confirmed → flip the flag so the reconciler ignores this row.
+    repo.mark_synced(session, job.id)
     return JobAccepted(
-        id=job.id, type=job.type, status=job.status, created_at=job.created_at
+        id=job.id,
+        type=job.type,
+        status=job.status,
+        created_at=job.created_at,
+        scheduled_at=job.scheduled_at,
     )
 
 

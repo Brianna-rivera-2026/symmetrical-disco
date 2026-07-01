@@ -50,3 +50,50 @@ def test_list_filters_by_type(client):
     items = resp.json()["items"]
     assert len(items) == 1
     assert items[0]["type"] == "email"
+
+
+def test_submit_scheduled_job_parks_in_zset(client):
+    from datetime import datetime, timedelta, timezone
+
+    client.app.state.redis.flushdb()
+    when = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    resp = client.post(
+        "/jobs",
+        json={
+            "type": "email",
+            "payload": {"to": "a@b.com", "subject": "Hi"},
+            "scheduled_at": when,
+        },
+    )
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["status"] == "scheduled"
+    assert body["scheduled_at"] is not None
+
+    redis_client = client.app.state.redis
+    settings = client.app.state.settings
+    assert redis_client.zcard(settings.delayed_zset) == 1
+    assert redis_client.xlen(settings.jobs_stream) == 0
+
+
+def test_submit_past_scheduled_at_runs_immediately(client):
+    from datetime import datetime, timedelta, timezone
+
+    client.app.state.redis.flushdb()
+    when = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    resp = client.post(
+        "/jobs",
+        json={
+            "type": "email",
+            "payload": {"to": "a@b.com", "subject": "Hi"},
+            "scheduled_at": when,
+        },
+    )
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["status"] == "pending"
+
+    redis_client = client.app.state.redis
+    settings = client.app.state.settings
+    assert redis_client.xlen(settings.jobs_stream) == 1
+    assert redis_client.zcard(settings.delayed_zset) == 0
