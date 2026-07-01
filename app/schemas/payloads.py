@@ -9,21 +9,21 @@ MAX_BATCH_ITEMS = 500
 
 class EmailPayload(BaseModel):
     type: Literal[JobType.email] = JobType.email
-    to: str
-    subject: str
-    body: str | None = None
+    to: str = Field(max_length=320)
+    subject: str = Field(max_length=500)
+    body: str | None = Field(default=None, max_length=20_000)
 
 
 class WebhookPayload(BaseModel):
     type: Literal[JobType.webhook] = JobType.webhook
-    url: str
-    method: str = "POST"
+    url: str = Field(max_length=2048)
+    method: str = Field(default="POST", max_length=10)
 
 
 class ReportPayload(BaseModel):
     type: Literal[JobType.report] = JobType.report
-    report_type: str
-    params: dict | None = None
+    report_type: str = Field(max_length=100)
+    params: dict | None = Field(default=None, max_length=50)
 
 
 _BaseItemPayload = Union[EmailPayload, WebhookPayload, ReportPayload]

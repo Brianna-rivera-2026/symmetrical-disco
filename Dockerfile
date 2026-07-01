@@ -12,6 +12,9 @@ RUN uv sync --frozen --no-dev
 
 COPY . .
 
+RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
 ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 8000
