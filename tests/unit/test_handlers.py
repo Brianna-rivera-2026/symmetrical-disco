@@ -12,27 +12,27 @@ def _no_sleep(monkeypatch):
 
 
 def test_email_returns_message_id():
-    out = handlers.handle_email(EmailPayload(to="a@b.com", subject="Hi"))
+    out = handlers.handle_email(EmailPayload(to="a@b.com", subject="Hi"), None)
     assert "message_id" in out
 
 
 def test_report_returns_file_url():
-    out = handlers.handle_report(ReportPayload(report_type="sales"))
+    out = handlers.handle_report(ReportPayload(report_type="sales"), None)
     assert out["file_url"].startswith("https://")
 
 
 def test_webhook_success_branch(monkeypatch):
-    monkeypatch.setattr(handlers.random, "random", lambda: 0.5)  # >= 0.2 → success
-    out = handlers.handle_webhook(WebhookPayload(url="https://x.test"))
+    monkeypatch.setattr(handlers.random, "random", lambda: 0.5)
+    out = handlers.handle_webhook(WebhookPayload(url="https://x.test"), None)
     assert out == {"status": 200}
 
 
 def test_webhook_failure_branch(monkeypatch):
-    monkeypatch.setattr(handlers.random, "random", lambda: 0.05)  # < 0.2 → failure
+    monkeypatch.setattr(handlers.random, "random", lambda: 0.05)
     with pytest.raises(handlers.WebhookFailedError):
-        handlers.handle_webhook(WebhookPayload(url="https://x.test"))
+        handlers.handle_webhook(WebhookPayload(url="https://x.test"), None)
 
 
 def test_run_handler_dispatches_by_type():
-    out = run_handler(JobType.email, EmailPayload(to="a@b.com", subject="Hi"))
+    out = run_handler(JobType.email, EmailPayload(to="a@b.com", subject="Hi"), None)
     assert "message_id" in out
