@@ -6,160 +6,35 @@
 
 **Architecture:** Two named Docker volumes (`pgdata`, `redisdata`) + Redis AOF close the persistence gap. `stop_grace_period` tuned to each service's worst-case drain time (already-implemented SIGTERM handling in `worker`/`ticker`, uvicorn in `api`) closes the redeploy gap. Explicit image tags give a rollback path. Total Redis loss recovery stays a documented manual playbook — no new application code for that case (approved design decision).
 
-**Tech Stack:** Docker Compose, Redis 7 (AOF), PostgreSQL 16, pytest + testcontainers (integration tests), PyYAML (new dev dependency, for a compose-config-reading test).
+**Tech Stack:** Docker Compose, Redis 7 (AOF), PostgreSQL 16.
 
 ## Global Constraints
 
 - Run all Python/tooling via `uv run ...` (e.g. `uv run pytest`, `uv run ruff check --fix`) — never raw `python`/`pip`/`venv`. (CLAUDE.md)
-- Add new dependencies via `uv add --dev <package>`, never edit `pyproject.toml`'s dependency list by hand.
-- No `print()` in application or test code — structured logging (`structlog`) only, and tests use `assert`, not prints. (CLAUDE.md)
-- This plan makes **no schema/migration change** and **no job-processing application-code change** — only `docker-compose.yml` config, two new/extended test files, and docs (per the approved spec, §5).
+- No `print()` in application code — structured logging (`structlog`) only. (CLAUDE.md)
+- This plan makes **no schema/migration change** and **no job-processing application-code change** — only `docker-compose.yml` config and docs (per the approved spec, §5).
+- **Config-only changes (Docker Compose, env vars, infra flags) are verified manually — a documented command + expected output — not via automated pytest tests.** Automated tests are reserved for actual application code behavior. (Project convention; see also: a real-OS-SIGTERM test was tried for the drain behavior below and dropped after hitting a Windows-only trap — `os.kill(pid, SIGTERM)` hard-kills via `TerminateProcess` on Windows instead of invoking the registered handler — reinforcing why manual verification is the right tool for infra config.)
 - Redis image: `redis:7`. Postgres image: `postgres:16`. Python: `>=3.11`. (existing `docker-compose.yml` / `pyproject.toml`)
-- Follow existing test conventions: integration tests live in `tests/integration/`, use the `testcontainers`-based fixtures already in `tests/integration/conftest.py` (`redis_container`, `pg_engine`, etc.) where applicable, and use `app.core.redis.create_redis_client` (not a bare `redis.Redis(...)`) for any new Redis client construction, matching `tests/integration/conftest.py:56-61`.
 
 ---
 
 ## File Structure
 
-- **Modify:** `docker-compose.yml` — add `pgdata`/`redisdata` named volumes + Redis AOF `command` (Task 2); add `stop_grace_period` per service + shared `image:` tag (Task 4).
-- **Create:** `tests/integration/test_persistence.py` — static compose-config assertions (volumes + AOF present) and a dynamic Redis-container-recreation test proving Stream/ZSET data survives (Task 1).
-- **Modify:** `tests/integration/test_worker.py` — add a real-SIGTERM graceful-drain characterization test (Task 3).
-- **Create:** `docs/runbooks/redis-total-loss-recovery.md` — the operator playbook for a total Redis wipe, adapted from spec §3.3 (Task 5).
-- **Modify:** `DECISIONS.md` — new "§6 Persistence, Redeploys & Recovery" section (Task 6).
-- **Modify:** `README.md` — new "Persistence & Deployment" section + link to the runbook and the production-hardening spec (Task 6).
-- **Modify:** `pyproject.toml` / `uv.lock` — add `pyyaml` as a dev dependency, via `uv add --dev pyyaml` (Task 1, step 1).
+- **Modify:** `docker-compose.yml` — add `pgdata`/`redisdata` named volumes + Redis AOF `command` (Task 1); add `stop_grace_period` per service + shared `image:` tag (Task 2).
+- **Create:** `docs/runbooks/redis-total-loss-recovery.md` — the operator playbook for a total Redis wipe, adapted from spec §3.3 (Task 3).
+- **Modify:** `DECISIONS.md` — new "§6 Persistence, Redeploys & Recovery" section (Task 4).
+- **Modify:** `README.md` — new "Persistence & Deployment" section + link to the runbook and the production-hardening spec (Task 4).
 
 ---
 
-### Task 1: Persistence integration test (RED)
-
-**Files:**
-- Create: `tests/integration/test_persistence.py`
-- Modify: `pyproject.toml`, `uv.lock` (via `uv add --dev pyyaml`)
-
-**Interfaces:**
-- Consumes: `app.core.redis.create_redis_client(redis_url: str) -> redis.Redis` (existing, `app/core/redis.py:4`).
-- Produces: nothing new for later tasks — this is a leaf test file. Later tasks (2) make it pass.
-
-This test reads the *actual* `docker-compose.yml` file (not a hardcoded copy of the config), so it goes RED now and GREEN only once Task 2 edits the real file — genuine regression protection, not a demonstration test.
-
-- [ ] **Step 1: Add the `pyyaml` dev dependency**
-
-Run: `uv add --dev pyyaml`
-Expected: `pyproject.toml`'s `[dependency-groups] dev` list gains a `pyyaml>=...` entry and `uv.lock` updates.
-
-- [ ] **Step 2: Write the failing test**
-
-Create `tests/integration/test_persistence.py`:
-
-```python
-import time
-import uuid
-from pathlib import Path
-
-import docker
-import pytest
-import yaml
-from testcontainers.redis import RedisContainer
-
-from app.core.redis import create_redis_client
-
-COMPOSE_PATH = Path(__file__).resolve().parents[2] / "docker-compose.yml"
-
-
-def _load_compose_services() -> dict:
-    compose = yaml.safe_load(COMPOSE_PATH.read_text())
-    return compose["services"]
-
-
-def test_compose_services_declare_persistent_volumes():
-    services = _load_compose_services()
-
-    postgres_volumes = services["postgres"].get("volumes", [])
-    assert any(v.endswith(":/var/lib/postgresql/data") for v in postgres_volumes), (
-        "postgres service must mount a named volume at /var/lib/postgresql/data"
-    )
-
-    redis_service = services["redis"]
-    redis_volumes = redis_service.get("volumes", [])
-    assert any(v.endswith(":/data") for v in redis_volumes), (
-        "redis service must mount a named volume at /data for persistence"
-    )
-    command = redis_service.get("command", "")
-    assert "--appendonly yes" in command, "redis must run with AOF enabled"
-
-
-def test_redis_state_survives_container_recreation_with_compose_config():
-    redis_command = _load_compose_services()["redis"]["command"]
-    docker_client = docker.from_env()
-    volume_name = f"test-redis-persist-{uuid.uuid4().hex[:8]}"
-    docker_client.volumes.create(name=volume_name)
-    try:
-        first = RedisContainer("redis:7").with_volume_mapping(
-            volume_name, "/data", mode="rw"
-        )
-        first.with_command(redis_command)
-        first.start()
-        try:
-            url = (
-                f"redis://{first.get_container_host_ip()}:"
-                f"{first.get_exposed_port(6379)}/0"
-            )
-            client = create_redis_client(url)
-            client.xadd("teststream", {"job_id": "abc"})
-            client.zadd("jobs:delayed", {"job-2": 123456.0})
-            # appendfsync everysec flushes on a ~1s cycle; wait past it before
-            # we pull the container out from under the writes.
-            time.sleep(1.5)
-            client.close()
-        finally:
-            first.stop()  # stops + removes the container; the named volume is untouched
-
-        second = RedisContainer("redis:7").with_volume_mapping(
-            volume_name, "/data", mode="rw"
-        )
-        second.with_command(redis_command)
-        second.start()
-        try:
-            url = (
-                f"redis://{second.get_container_host_ip()}:"
-                f"{second.get_exposed_port(6379)}/0"
-            )
-            client = create_redis_client(url)
-            entries = client.xrange("teststream", "-", "+")
-            assert len(entries) == 1
-            assert entries[0][1] == {"job_id": "abc"}
-            assert client.zscore("jobs:delayed", "job-2") == 123456.0
-            client.close()
-        finally:
-            second.stop()
-    finally:
-        docker_client.volumes.get(volume_name).remove(force=True)
-```
-
-- [ ] **Step 2b: Run test to verify it fails**
-
-Run: `uv run pytest tests/integration/test_persistence.py -v`
-Expected: FAIL — both tests fail against today's `docker-compose.yml`:
-`test_compose_services_declare_persistent_volumes` fails on the postgres-volume assertion (no `volumes:` key exists on either service yet); `test_redis_state_survives_container_recreation_with_compose_config` fails with a `KeyError: 'command'` (redis service has no `command` key yet), since the container starts with default (non-AOF) settings and the second container — pointed at an empty-by-default `/data` mount with no AOF — has nothing to read.
-
-- [ ] **Step 3: Commit the RED test**
-
-```bash
-git add tests/integration/test_persistence.py pyproject.toml uv.lock
-git commit -m "test: add failing persistence coverage for compose volumes + AOF"
-```
-
----
-
-### Task 2: Add named volumes + Redis AOF to docker-compose.yml (GREEN)
+### Task 1: Add named volumes + Redis AOF to docker-compose.yml
 
 **Files:**
 - Modify: `docker-compose.yml`
 
 **Interfaces:**
 - Consumes: nothing new.
-- Produces: the `pgdata`/`redisdata` volumes and Redis `command` that Task 1's test reads and Task 4 builds on.
+- Produces: the `pgdata`/`redisdata` volumes and Redis `command` that Task 2 builds on.
 
 - [ ] **Step 1: Edit `docker-compose.yml`** — add `volumes:` to `postgres`, add `command:` + `volumes:` to `redis`, and a top-level `volumes:` block:
 
@@ -202,12 +77,7 @@ volumes:
   redisdata:
 ```
 
-- [ ] **Step 2: Run the persistence test to verify it passes**
-
-Run: `uv run pytest tests/integration/test_persistence.py -v`
-Expected: PASS (2 passed). Note: the second test builds two real `redis:7` containers and sleeps 1.5s, so expect it to take several seconds — this is normal.
-
-- [ ] **Step 3: Manual verification against the real compose stack**
+- [ ] **Step 2: Manual verification against the real compose stack**
 
 Run:
 ```bash
@@ -217,9 +87,9 @@ docker compose down
 docker compose up -d postgres redis
 docker compose exec redis redis-cli get smoke-test
 ```
-Expected: the final command prints `hello` — proving the real `docker-compose.yml` (not just the test's ad hoc containers) persists Redis data across a `down`/`up` cycle. Clean up with `docker compose down`.
+Expected: the final command prints `hello` — proving `docker-compose.yml` persists Redis data across a `down`/`up` cycle. Clean up with `docker compose down`.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add docker-compose.yml
@@ -228,83 +98,14 @@ git commit -m "feat: persist postgres and redis data via named volumes + AOF"
 
 ---
 
-### Task 3: Worker graceful-drain characterization test
-
-**Files:**
-- Modify: `tests/integration/test_worker.py`
-
-**Interfaces:**
-- Consumes: `app.worker.runner.run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -> int` (existing, `app/worker/runner.py:75`) — already installs real `signal.signal(signal.SIGTERM, ...)` handlers at `app/worker/runner.py:87-88` and only checks `_should_stop()` at the top of its loop (`app/worker/runner.py:102`), so with `read_priority`'s `count=1` (`app/queue/consumer.py:48`) at most one job is ever in flight.
-- Produces: nothing new for later tasks.
-
-This test does **not** require new application code — the drain behavior already exists (`worker/runner.py:84-88`, `97-98`). It is a regression guard proving a *real* OS SIGTERM (not the injected `stop` callable every other test in this file uses) is honored only after the in-flight job completes. Because `signal.signal()` only works on the main thread, the test sends the signal from a background `threading.Timer` while `run_forever` blocks the main thread — this mirrors how Docker actually delivers SIGTERM to a running process.
-
-- [ ] **Step 1: Write the test**
-
-Add to `tests/integration/test_worker.py` (needs `import os`, `import signal`, `import threading` at the top of the file alongside the existing `import time`):
-
-```python
-def test_run_forever_drains_in_flight_job_on_real_sigterm(
-    test_settings, redis_client, pg_engine, monkeypatch
-):
-    from app.core.db import make_session_factory
-    from app.queue.consumer import ensure_group
-    from app.queue.producer import enqueue
-    from app.worker.runner import run_forever
-
-    # Let the handler run for real (not the autouse no-sleep patch) so the
-    # SIGTERM arrives while the job is still in flight.
-    monkeypatch.setattr(handlers.time, "sleep", lambda *_: _real_sleep(0.5))
-
-    for stream in test_settings.ordered_streams:
-        ensure_group(redis_client, stream, test_settings.consumer_group)
-    factory = make_session_factory(pg_engine)
-    with factory() as s:
-        job = repo.create_job(s, JobType.email, {"to": "a@b.com", "subject": "Hi"})
-    enqueue(redis_client, test_settings.stream_normal, str(job.id))
-
-    # Fire mid-handler: the worker has already claimed the job (well under
-    # 0.5s) but the handler's sleep is not yet done.
-    timer = threading.Timer(0.15, lambda: os.kill(os.getpid(), signal.SIGTERM))
-    timer.start()
-    try:
-        exit_code = run_forever(test_settings)
-    finally:
-        timer.cancel()
-
-    assert exit_code == 0
-    with factory() as s:
-        assert repo.get_job(s, job.id).status is JobStatus.completed
-    assert (
-        redis_client.xpending(test_settings.stream_normal, test_settings.consumer_group)[
-            "pending"
-        ]
-        == 0
-    )
-```
-
-- [ ] **Step 2: Run test to verify it already passes**
-
-Run: `uv run pytest tests/integration/test_worker.py::test_run_forever_drains_in_flight_job_on_real_sigterm -v`
-Expected: PASS immediately. This is expected and correct — the drain logic predates this plan (spec §4.1: "No worker code change"); this step exists to add permanent regression coverage for a real-signal path the suite didn't previously exercise (existing tests only use the injected `stop` callable, e.g. `test_worker.py:80-104`).
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add tests/integration/test_worker.py
-git commit -m "test: cover worker graceful drain on a real SIGTERM"
-```
-
----
-
-### Task 4: stop_grace_period + image tags for zero-loss redeploys
+### Task 2: stop_grace_period + image tags for zero-loss redeploys
 
 **Files:**
 - Modify: `docker-compose.yml`
 
 **Interfaces:**
 - Consumes: nothing new.
-- Produces: nothing consumed by later tasks (Task 6 docs reference these values by their literal numbers, not by import).
+- Produces: nothing consumed by later tasks (Task 4 docs reference these values by their literal numbers, not by import).
 
 - [ ] **Step 1: Edit `docker-compose.yml`** — add `image:` to each buildable service and `stop_grace_period:` to `api`, `worker`, `ticker`:
 
@@ -390,6 +191,8 @@ docker compose logs worker --tail 20
 ```
 Expected: the worker logs show `job.completed` (or `job.received` immediately followed by a normal finish) before `worker.stopped exit_code=0` — i.e., the container exits on its own well before the 50s timeout, rather than being killed. Clean up with `docker compose down`.
 
+This manual check is the only verification for graceful drain in this plan — an automated real-OS-SIGTERM test was tried and dropped (see Global Constraints) after hitting a Windows-only signal-delivery trap. The worker's SIGTERM handling itself is pre-existing application code (`app/worker/runner.py:84-88`, unchanged by this plan) — this task only adds the compose-level `stop_grace_period` that lets that existing behavior take effect during a real redeploy.
+
 - [ ] **Step 4: Commit**
 
 ```bash
@@ -399,14 +202,14 @@ git commit -m "feat: graceful stop_grace_period + explicit image tags for redepl
 
 ---
 
-### Task 5: Total Redis loss recovery playbook
+### Task 3: Total Redis loss recovery playbook
 
 **Files:**
 - Create: `docs/runbooks/redis-total-loss-recovery.md`
 
 **Interfaces:**
 - Consumes: nothing (pure documentation).
-- Produces: a path referenced by Task 6's README/DECISIONS updates.
+- Produces: a path referenced by Task 4's README/DECISIONS updates.
 
 - [ ] **Step 1: Write the playbook**
 
@@ -510,7 +313,7 @@ git commit -m "docs: add total-Redis-loss recovery playbook"
 
 ---
 
-### Task 6: DECISIONS.md and README.md updates
+### Task 4: DECISIONS.md and README.md updates
 
 **Files:**
 - Modify: `DECISIONS.md`
@@ -550,6 +353,13 @@ explicit `image:` tags for rollback; total-Redis-loss recovery is a
   new reset semantics on `is_synced_to_redis`, and a race-safe sentinel — real
   complexity for a failure mode the volume + AOF already make rare. See
   `docs/runbooks/redis-total-loss-recovery.md` for the manual procedure.
+- We also deliberately did **not** write automated tests asserting the
+  `docker-compose.yml` config itself (volumes, AOF, `stop_grace_period`) —
+  config-only changes are verified manually. An early attempt at an automated
+  real-OS-SIGTERM regression test hit a Windows-only trap
+  (`os.kill(pid, SIGTERM)` hard-kills via `TerminateProcess` on Windows
+  instead of invoking the registered handler) that a manual check never would
+  have hit.
 
 **Trade-offs:**
 - **Deploy latency:** the worker's `stop_grace_period: 50s` means a redeploy
@@ -578,7 +388,11 @@ explicit `image:` tags for rollback; total-Redis-loss recovery is a
 
 Insert this new section between the job-types bullet list and the closing
 "For the full design, see..." line (i.e., right after the `**report:**` bullet,
-before the final paragraph):
+before the final paragraph). **Check the current `README.md` content first** —
+it may already have local, uncommitted edits (e.g. new `/health`, `/stats`,
+`/cancel` endpoint docs); place this section sensibly relative to whatever
+structure is actually there rather than assuming the exact anchor text below
+still matches verbatim:
 
 ```markdown
 
@@ -609,13 +423,11 @@ recovery is a manual procedure — see
 [`docs/runbooks/redis-total-loss-recovery.md`](docs/runbooks/redis-total-loss-recovery.md).
 ```
 
-Then update the final line of the file from:
+Then update the design-spec link line at/near the end of the file (wherever it
+currently points only at the Phase 1 design doc) to also link the production-
+hardening spec, e.g. appending:
 ```markdown
-For the full design, see [`docs/superpowers/specs/2026-06-30-job-processing-phase1-design.md`](docs/superpowers/specs/2026-06-30-job-processing-phase1-design.md).
-```
-to:
-```markdown
-For the full design, see [`docs/superpowers/specs/2026-06-30-job-processing-phase1-design.md`](docs/superpowers/specs/2026-06-30-job-processing-phase1-design.md), and for the persistence/redeploy hardening described above, see [`docs/superpowers/specs/2026-07-01-production-hardening-design.md`](docs/superpowers/specs/2026-07-01-production-hardening-design.md).
+ and for the persistence/redeploy hardening described above, see [`docs/superpowers/specs/2026-07-01-production-hardening-design.md`](docs/superpowers/specs/2026-07-01-production-hardening-design.md).
 ```
 
 - [ ] **Step 3: Commit**
@@ -632,9 +444,8 @@ git commit -m "docs: document persistence, redeploy drain, and migration discipl
 - [ ] **Run the full suite**
 
 Run: `uv run pytest`
-Expected: all tests pass, including the two new/extended files
-(`tests/integration/test_persistence.py`,
-`tests/integration/test_worker.py::test_run_forever_drains_in_flight_job_on_real_sigterm`).
+Expected: all tests pass (this plan adds no new tests — 161 passed is the
+baseline this plan should still show at the end).
 
 - [ ] **Lint**
 
