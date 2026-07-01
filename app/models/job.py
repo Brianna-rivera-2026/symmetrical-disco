@@ -8,7 +8,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
-from app.schemas.enums import JobStatus, JobType
+from app.schemas.enums import JobPriority, JobStatus, JobType
 
 
 class Job(Base):
@@ -22,6 +22,13 @@ class Job(Base):
     status: Mapped[JobStatus] = mapped_column(
         SAEnum(JobStatus, name="job_status"),
         default=JobStatus.pending,
+        index=True,
+    )
+    priority: Mapped[JobPriority] = mapped_column(
+        SAEnum(JobPriority, name="job_priority"),
+        default=JobPriority.normal,
+        server_default="normal",
+        nullable=False,
         index=True,
     )
     result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
@@ -45,4 +52,5 @@ class Job(Base):
     def __init__(self, **kwargs: object) -> None:
         kwargs.setdefault("id", uuid.uuid4())
         kwargs.setdefault("status", JobStatus.pending)
+        kwargs.setdefault("priority", JobPriority.normal)
         super().__init__(**kwargs)

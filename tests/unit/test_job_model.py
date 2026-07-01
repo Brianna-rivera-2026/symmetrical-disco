@@ -19,6 +19,7 @@ def test_job_table_and_columns():
         "completed_at",
         "scheduled_at",
         "is_synced_to_redis",
+        "priority",
     }
 
 
@@ -26,3 +27,10 @@ def test_job_defaults_when_instantiated():
     j = Job(type=JobType.email, payload={"to": "a@b.com", "subject": "Hi"})
     assert isinstance(j.id, uuid.UUID)
     assert j.status is JobStatus.pending
+
+
+def test_job_defaults_priority_normal():
+    from app.schemas.enums import JobPriority
+
+    j = Job(type=JobType.email, payload={"to": "a@b.com", "subject": "Hi"})
+    assert j.priority is JobPriority.normal
