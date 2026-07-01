@@ -168,7 +168,18 @@ covers one pass.
 
 **Unit (no Docker):** none — this change adds no application code.
 
-**Integration (testcontainers):**
+**Update (post-implementation):** the two integration tests originally specified
+below were implemented, then reclassified to manual verification per a project-wide
+policy: config-only changes (Docker Compose, env vars, infra flags) are verified
+manually, not via automated pytest tests — reinforced when the graceful-drain test
+hit a genuine Windows-only trap (`os.kill(pid, SIGTERM)` hard-kills via
+`TerminateProcess` on Windows instead of invoking the registered handler). Both are
+now manual steps in the implementation plan
+(`docs/superpowers/plans/2026-07-01-production-hardening.md`, Tasks 1 and 2) instead
+of automated tests. The original intent (below) is preserved for context; treat the
+plan and `DECISIONS.md` §6 as authoritative for what actually shipped.
+
+**Integration (testcontainers) — superseded, see note above:**
 1. **Restart-with-volume:** submit jobs, restart the Redis container keeping the
    volume, assert jobs still complete (state survived via the volume + AOF).
 2. **Graceful drain:** start a long `report` job, send SIGTERM to the worker →
