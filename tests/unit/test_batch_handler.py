@@ -25,40 +25,63 @@ class _FakeCtx:
         self.progress.append(pct)
 
 
-def test_batch_summarizes_success_and_failure():
-    payload = BatchPayload(items=[{"ok": 1}, {"fail": True}, {"ok": 2}])
+def test_batch_dispatches_real_handlers_mixed_success_and_failure(monkeypatch):
+    monkeypatch.setattr(handlers.random, "random", lambda: 0.05)  # forces webhook < 0.2 -> fail
+    payload = BatchPayload(
+        items=[
+            {"type": "email", "to": "a@b.com", "subject": "Hi"},
+            {"type": "webhook", "url": "https://x.test"},
+            {"type": "report", "report_type": "sales"},
+        ]
+    )
     out = handle_batch(payload, _FakeCtx())
     assert out["total"] == 3
     assert out["succeeded"] == 2
     assert out["failed"] == 1
-    assert out["errors"][0]["index"] == 1
-    assert "progress" not in out  # progress lives on the row, not in the summary
+    assert [r["index"] for r in out["results"]] == [0, 2]
+    assert "message_id" in out["results"][0]["result"]
+    assert "file_url" in out["results"][1]["result"]
+    assert out["errors"] == [
+        {"index": 1, "error": "webhook call to https://x.test failed"}
+    ]
 
 
-def test_batch_completes_even_if_all_fail():
-    payload = BatchPayload(items=[{"fail": True}, {"fail": True}])
+def test_batch_all_fail_still_completes(monkeypatch):
+    monkeypatch.setattr(handlers.random, "random", lambda: 0.05)  # every webhook fails
+    payload = BatchPayload(
+        items=[
+            {"type": "webhook", "url": "https://a.test"},
+            {"type": "webhook", "url": "https://b.test"},
+        ]
+    )
     out = handle_batch(payload, _FakeCtx())
-    assert out == {
-        "total": 2,
-        "succeeded": 0,
-        "failed": 2,
-        "errors": [
-            {"index": 0, "error": "item failed"},
-            {"index": 1, "error": "item failed"},
-        ],
-    }
+    assert out["succeeded"] == 0
+    assert out["failed"] == 2
+    assert out["results"] == []
+    assert [e["index"] for e in out["errors"]] == [0, 1]
 
 
 def test_batch_raises_jobcancelled_with_partial_summary():
     ctx = _FakeCtx(cancel_after=2)  # first two items processed, then cancel
-    payload = BatchPayload(items=[{}, {}, {}, {}])
+    payload = BatchPayload(
+        items=[
+            {"type": "email", "to": "a@b.com", "subject": "1"},
+            {"type": "email", "to": "a@b.com", "subject": "2"},
+            {"type": "report", "report_type": "sales"},
+            {"type": "report", "report_type": "ops"},
+        ]
+    )
     with pytest.raises(JobCancelled) as exc:
         handle_batch(payload, ctx)
     assert exc.value.summary["succeeded"] == 2
     assert exc.value.summary["total"] == 4
+    assert len(exc.value.summary["results"]) == 2
 
 
 def test_batch_reports_progress_per_item():
     ctx = _FakeCtx()
-    handle_batch(BatchPayload(items=[{}, {}, {}, {}]), ctx)
+    payload = BatchPayload(
+        items=[{"type": "email", "to": "a@b.com", "subject": str(i)} for i in range(4)]
+    )
+    handle_batch(payload, ctx)
     assert ctx.progress == [25, 50, 75, 100]

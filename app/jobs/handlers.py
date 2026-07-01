@@ -42,21 +42,18 @@ def handle_report(payload: ReportPayload, ctx) -> dict:
     return {"file_url": f"https://reports.local/{uuid.uuid4().hex[:12]}.pdf"}
 
 
-def _process_item(item: dict, delay_ms: int) -> None:
-    time.sleep(delay_ms / 1000)
-    if item.get("fail"):
-        raise RuntimeError(item.get("error", "item failed"))
-
-
 def handle_batch(payload: BatchPayload, ctx) -> dict:
+    from app.jobs.registry import run_handler  # deferred: registry imports this module
+
     n = len(payload.items)
-    summary = {"total": n, "succeeded": 0, "failed": 0, "errors": []}
+    summary = {"total": n, "succeeded": 0, "failed": 0, "results": [], "errors": []}
     for i, item in enumerate(payload.items):
         if ctx.cancelled():
             raise JobCancelled(summary)
         try:
-            _process_item(item, payload.item_delay_ms)
+            result = run_handler(item.type, item, ctx)
             summary["succeeded"] += 1
+            summary["results"].append({"index": i, "result": result})
         except Exception as exc:  # noqa: BLE001 — per-item, collected not raised
             summary["failed"] += 1
             summary["errors"].append({"index": i, "error": str(exc)})

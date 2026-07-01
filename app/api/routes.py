@@ -84,14 +84,7 @@ def submit_job(
 ) -> JobAccepted:
     settings = request.app.state.settings
     try:
-        validate_payload(
-            submission.type,
-            submission.payload,
-            context={
-                "handler_timeout_s": settings.job_handler_timeout_s,
-                "safety_factor": settings.batch_timeout_safety_factor,
-            },
-        )
+        validate_payload(submission.type, submission.payload)
     except (ValidationError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
