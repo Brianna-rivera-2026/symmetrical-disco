@@ -301,3 +301,77 @@ def test_reset_failed_to_pending_only_from_failed(db_session):
     assert job.is_synced_to_redis is False
     # A second reset finds it already pending → guard fails.
     assert repo.reset_failed_to_pending(db_session, job.id) is False
+
+
+def test_init_progress_only_when_processing(db_session):
+    job = repo.create_job(db_session, JobType.batch, {"items": []})
+    assert repo.init_progress(db_session, job.id) is False  # pending, not processing
+    repo.claim_job(db_session, job.id)
+    assert repo.init_progress(db_session, job.id) is True
+    db_session.refresh(job)
+    assert job.progress == 0
+
+
+def test_complete_job_sets_progress_for_batch(db_session):
+    job = repo.create_job(db_session, JobType.batch, {"items": []})
+    repo.claim_job(db_session, job.id)
+    assert repo.complete_job(db_session, job.id, {"total": 0}, progress=100) is True
+    db_session.refresh(job)
+    assert job.status is JobStatus.completed
+    assert job.progress == 100
+
+
+def test_complete_job_leaves_progress_null_for_non_batch(db_session):
+    job = repo.create_job(db_session, JobType.email, {"to": "a", "subject": "b"})
+    repo.claim_job(db_session, job.id)
+    repo.complete_job(db_session, job.id, {"message_id": "m"})
+    db_session.refresh(job)
+    assert job.progress is None
+
+
+def test_cancel_pending_or_scheduled_guard(db_session):
+    job = repo.create_job(db_session, JobType.email, {"to": "a", "subject": "b"})
+    assert repo.cancel_pending_or_scheduled(db_session, job.id) is True
+    db_session.refresh(job)
+    assert job.status is JobStatus.cancelled
+    # second call is a no-op (already cancelled)
+    assert repo.cancel_pending_or_scheduled(db_session, job.id) is False
+
+
+def test_cancel_pending_or_scheduled_rejects_processing(db_session):
+    job = repo.create_job(db_session, JobType.email, {"to": "a", "subject": "b"})
+    repo.claim_job(db_session, job.id)
+    assert repo.cancel_pending_or_scheduled(db_session, job.id) is False
+
+
+def test_request_cancel_only_when_processing(db_session):
+    job = repo.create_job(db_session, JobType.batch, {"items": []})
+    assert repo.request_cancel(db_session, job.id) is False  # pending
+    repo.claim_job(db_session, job.id)
+    assert repo.request_cancel(db_session, job.id) is True
+    db_session.refresh(job)
+    assert job.cancel_requested_at is not None
+
+
+def test_cancel_job_guarded_terminal(db_session):
+    job = repo.create_job(db_session, JobType.batch, {"items": []})
+    repo.claim_job(db_session, job.id)
+    assert repo.cancel_job(db_session, job.id, {"total": 3, "succeeded": 1}) is True
+    db_session.refresh(job)
+    assert job.status is JobStatus.cancelled
+    assert job.result == {"total": 3, "succeeded": 1}
+
+
+def test_get_by_idempotency_key(db_session):
+    key = "abc"
+    assert repo.get_by_idempotency_key(db_session, key) is None
+    job = repo.create_job(
+        db_session,
+        JobType.email,
+        {"to": "a", "subject": "b"},
+        idempotency_key=key,
+        idempotency_hash="h1",
+    )
+    found = repo.get_by_idempotency_key(db_session, key)
+    assert found is not None and found.id == job.id
+    assert found.idempotency_hash == "h1"

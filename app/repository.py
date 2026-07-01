@@ -22,6 +22,8 @@ def create_job(
     scheduled_at: datetime | None = None,
     priority: JobPriority = JobPriority.normal,
     max_attempts: int = 4,
+    idempotency_key: str | None = None,
+    idempotency_hash: str | None = None,
 ) -> Job:
     job = Job(
         type=job_type,
@@ -30,6 +32,8 @@ def create_job(
         scheduled_at=scheduled_at,
         priority=priority,
         max_attempts=max_attempts,
+        idempotency_key=idempotency_key,
+        idempotency_hash=idempotency_hash,
     )
     session.add(job)
     session.commit()
@@ -90,7 +94,9 @@ def claim_job(session: Session, job_id: UUID) -> bool:
     return result.rowcount == 1
 
 
-def complete_job(session: Session, job_id: UUID, result: dict) -> bool:
+def complete_job(
+    session: Session, job_id: UUID, result: dict, progress: int | None = None
+) -> bool:
     res = session.execute(
         update(Job)
         .where(Job.id == job_id, Job.status == JobStatus.processing)
@@ -99,6 +105,7 @@ def complete_job(session: Session, job_id: UUID, result: dict) -> bool:
             result=result,
             completed_at=_now(),
             attempts=Job.attempts + 1,
+            progress=progress if progress is not None else Job.progress,
         )
     )
     session.commit()
@@ -201,3 +208,52 @@ def get_priorities(session: Session, job_ids: list[UUID]) -> dict[UUID, JobPrior
         select(Job.id, Job.priority).where(Job.id.in_(job_ids))
     ).all()
     return {row.id: row.priority for row in rows}
+
+
+def init_progress(session: Session, job_id: UUID) -> bool:
+    res = session.execute(
+        update(Job)
+        .where(Job.id == job_id, Job.status == JobStatus.processing)
+        .values(progress=0)
+    )
+    session.commit()
+    return res.rowcount == 1
+
+
+def cancel_pending_or_scheduled(session: Session, job_id: UUID) -> bool:
+    res = session.execute(
+        update(Job)
+        .where(
+            Job.id == job_id,
+            Job.status.in_([JobStatus.pending, JobStatus.scheduled]),
+        )
+        .values(status=JobStatus.cancelled, completed_at=_now())
+    )
+    session.commit()
+    return res.rowcount == 1
+
+
+def request_cancel(session: Session, job_id: UUID) -> bool:
+    res = session.execute(
+        update(Job)
+        .where(Job.id == job_id, Job.status == JobStatus.processing)
+        .values(cancel_requested_at=_now())
+    )
+    session.commit()
+    return res.rowcount == 1
+
+
+def cancel_job(session: Session, job_id: UUID, summary: dict) -> bool:
+    res = session.execute(
+        update(Job)
+        .where(Job.id == job_id, Job.status == JobStatus.processing)
+        .values(status=JobStatus.cancelled, result=summary, completed_at=_now())
+    )
+    session.commit()
+    return res.rowcount == 1
+
+
+def get_by_idempotency_key(session: Session, key: str) -> Job | None:
+    return session.execute(
+        select(Job).where(Job.idempotency_key == key)
+    ).scalar_one_or_none()
