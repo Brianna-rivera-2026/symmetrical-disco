@@ -48,6 +48,8 @@ class JobOut(BaseModel):
     scheduled_at: datetime | None
     attempts: int
     max_attempts: int
+    progress: int | None = None
+    cancel_requested_at: datetime | None = None
 
 
 class JobList(BaseModel):

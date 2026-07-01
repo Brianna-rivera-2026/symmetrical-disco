@@ -142,6 +142,35 @@ def retry_job(
     return JobOut.model_validate(job)
 
 
+@router.post("/jobs/{job_id}/cancel", response_model=JobOut)
+def cancel_job_route(
+    job_id: UUID,
+    request: Request,
+    response: Response,
+    session: Session = Depends(get_db),
+    client: redis.Redis = Depends(get_redis),
+) -> JobOut:
+    settings = request.app.state.settings
+    for _ in range(3):  # bounded re-resolve for the legal processing<->pending flap
+        if repo.cancel_pending_or_scheduled(session, job_id):
+            client.zrem(settings.delayed_zset, str(job_id))  # harmless no-op if absent
+            return JobOut.model_validate(repo.get_job(session, job_id))
+        if repo.request_cancel(session, job_id):
+            response.status_code = 202
+            return JobOut.model_validate(repo.get_job(session, job_id))
+        job = repo.get_job(session, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        if job.status is JobStatus.cancelled:
+            return JobOut.model_validate(job)  # idempotent 200
+        if job.status in (JobStatus.completed, JobStatus.failed):
+            raise HTTPException(
+                status_code=409, detail="job cannot be cancelled in its current state"
+            )
+        # pending/scheduled/processing again → loop and retry the guarded transitions
+    raise HTTPException(status_code=409, detail="job state is changing; retry")
+
+
 @router.get("/jobs", response_model=JobList)
 def list_jobs(
     session: Session = Depends(get_db),
