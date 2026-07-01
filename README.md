@@ -1,6 +1,6 @@
 # Distributed Job Processing System — Phase 1
 
-A distributed background job processing system built with **FastAPI**, **PostgreSQL**, **Redis Streams**, and multiple worker processes. This is Phase 1 of the system, implementing the basic flow: submit jobs via API, queue them, process them concurrently, and persist results.
+A distributed background job processing system built with **FastAPI**, **PostgreSQL**, **Redis Streams**, and multiple worker processes.
 
 ## Quick Start
 
@@ -40,9 +40,47 @@ uv run pytest tests/unit
 
 (Integration tests require Docker running with testcontainers.)
 
-### Submit a test job
+### API examples
 
-Submit an email job:
+All endpoints are served at `http://localhost:8000`.
+
+#### Health check
+
+```bash
+curl http://localhost:8000/health
+```
+
+```json
+{ "status": "ok", "checks": { "postgres": "ok", "redis": "ok" } }
+```
+
+Returns `503` with `"status": "unavailable"` if either dependency check fails.
+
+#### Queue and job stats
+
+```bash
+curl http://localhost:8000/stats
+```
+
+```json
+{
+  "queue": {
+    "streams": {
+      "high": { "depth": 0, "in_flight": 0 },
+      "normal": { "depth": 3, "in_flight": 1 },
+      "low": { "depth": 0, "in_flight": 0 }
+    },
+    "scheduled": 2,
+    "workers": 3
+  },
+  "jobs": {
+    "by_status": { "scheduled": 2, "pending": 3, "processing": 1, "completed": 118, "failed": 4, "cancelled": 1 },
+    "oldest_pending_age_seconds": 1.42
+  }
+}
+```
+
+#### Submit a job
 
 ```bash
 curl -X POST http://localhost:8000/jobs \
@@ -50,62 +88,113 @@ curl -X POST http://localhost:8000/jobs \
   -d '{"type":"email","payload":{"to":"a@b.com","subject":"Hi"}}'
 ```
 
-Response:
+Response (`202 Accepted`):
 
 ```json
-{ "id": "550e8400-e29b-41d4-a716-446655440000", "type": "email", "status": "pending", "created_at": "2026-06-30T..." }
+{ "id": "550e8400-e29b-41d4-a716-446655440000", "type": "email", "status": "pending", "priority": "normal", "created_at": "2026-06-30T12:00:00Z", "scheduled_at": null }
 ```
 
-Check the status:
+Optional request fields: `priority` (`high`/`normal`/`low`, default `normal`), `scheduled_at` (ISO-8601 — defers the job to the delayed queue instead of running it now), and `idempotency_key` (replaying the same key with the same payload returns the original job with `200`; reusing it with a different payload returns `409`):
+
+```bash
+curl -X POST http://localhost:8000/jobs \
+  -H 'content-type: application/json' \
+  -d '{"type":"report","payload":{"report_type":"weekly_summary"},"priority":"high","scheduled_at":"2026-07-02T09:00:00Z","idempotency_key":"weekly-report-2026-07-02"}'
+```
+
+#### Get a job
 
 ```bash
 curl http://localhost:8000/jobs/550e8400-e29b-41d4-a716-446655440000
 ```
 
-List jobs with filters:
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "type": "email",
+  "status": "completed",
+  "priority": "normal",
+  "payload": { "to": "a@b.com", "subject": "Hi" },
+  "result": { "sent": true },
+  "error": null,
+  "created_at": "2026-06-30T12:00:00Z",
+  "started_at": "2026-06-30T12:00:01Z",
+  "completed_at": "2026-06-30T12:00:02Z",
+  "scheduled_at": null,
+  "attempts": 1,
+  "max_attempts": 4,
+  "progress": 100,
+  "cancel_requested_at": null
+}
+```
+
+`404` if the job doesn't exist.
+
+#### Retry a failed job
+
+```bash
+curl -X POST http://localhost:8000/jobs/550e8400-e29b-41d4-a716-446655440000/retry
+```
+
+Resets the job to `pending` and re-enqueues it on its original priority stream. `404` if the job doesn't exist, `409` if it isn't currently `failed`.
+
+#### Cancel a job
+
+```bash
+curl -X POST http://localhost:8000/jobs/550e8400-e29b-41d4-a716-446655440000/cancel
+```
+
+- `200` — job was `pending`/`scheduled` and was cancelled immediately (also returned if it was already `cancelled`)
+- `202` — job was `processing`; cancellation is requested and takes effect at the worker's next checkpoint
+- `409` — job already `completed` or `failed`
+- `404` — job doesn't exist
+
+#### List jobs
 
 ```bash
 curl "http://localhost:8000/jobs?type=email&status=completed&limit=20"
 ```
 
-Pagination uses cursor-based keyset; add `&cursor=<opaque>` for the next page.
+```json
+{
+  "items": [
+    { "id": "550e8400-e29b-41d4-a716-446655440000", "type": "email", "status": "completed" }
+  ],
+  "next_cursor": "eyJjcmVhdGVkX2F0IjoiMjAyNi0wNi0zMFQxMjowMDowMFoifQ"
+}
+```
+
+Filters `type`, `status`, and `priority` are optional and combinable; `limit` defaults to 50 (max 200). Pagination is cursor-based keyset — pass the previous response's `next_cursor` back in for the next page:
+
+```bash
+curl "http://localhost:8000/jobs?type=email&status=completed&limit=20&cursor=eyJjcmVhdGVkX2F0IjoiMjAyNi0wNi0zMFQxMjowMDowMFoifQ"
+```
 
 ## Architecture Overview
 
-The system implements **at-least-once delivery** with three layers:
-
 ```
-Client
-   ↓
-API Service (FastAPI)
-   ├─ INSERT job (pending) → PostgreSQL
-   ├─ COMMIT
-   └─ XADD job_id → Redis Stream
-   
-Redis Stream + Consumer Group
-   ↓
-Worker Process (1 job at a time)
-   ├─ XREADGROUP COUNT 1 → claim a job
-   ├─ run_handler(job_type, payload)
-   ├─ UPDATE job (completed|failed) → PostgreSQL
-   ├─ COMMIT
-   └─ XACK → mark message as processed
+┌────────┐        ┌───────────────┐
+│ Client │───────▶│  API Service  │
+└────────┘        └───────┬───────┘
+                          │
+              ┌───────────┴───────────┐
+              ▼                       ▼
+      ┌───────────────┐          ┌────────┐
+      │  PostgreSQL   │          │ Redis  │
+      └───────────────┘          └────────┘
+              ▲                       ▲
+              └───────────┬───────────┘
+                          │
+              ┌───────────┴───────────┐
+              │                       │
+         ┌────────┐              ┌────────┐
+         │ Worker │              │ Ticker │
+         └────────┘              └────────┘
 ```
 
-**Key invariants:**
-
-1. **Commit-then-enqueue (§6):** API commits the job to Postgres first, then adds it to the Redis Stream. If the process crashes between these steps, a future recovery sweep (Phase 2 feature) will find the pending job.
-
-2. **Claim-guard (§7):** Before processing, the worker checks if the job is still `pending` in Postgres. A redelivered message (e.g., after a crash) will be skipped because the job is already `completed` or `failed`.
-
-3. **Ack-after-commit (§7):** Worker updates Postgres *and* commits the transaction *before* acknowledging the message in Redis. If the worker crashes after commit but before ack, the message stays in the consumer group's pending list and will be retried.
-
-4. **Unique consumer name per process:** Each worker process has a unique Redis consumer name (prefix + UUID), making consumer tracking unambiguous and enabling future recovery operations to target specific dead consumers.
-
-**Job types (payload schemas):**
-
-- **email:** `{to, subject, body?}` — sends an email (mock handler)
-- **webhook:** `{url, method?}` — calls an external URL (mock handler)
-- **report:** `{report_type, params?}` — generates a report (mock handler)
-
-For the full design, see [`docs/superpowers/specs/2026-06-30-job-processing-phase1-design.md`](docs/superpowers/specs/2026-06-30-job-processing-phase1-design.md).
+- **Client** — any HTTP caller submitting or querying jobs.
+- **API service** (FastAPI) — the only entry point. Touches **PostgreSQL** (inserts/reads job rows) and **Redis** (enqueues onto priority streams, schedules delayed jobs).
+- **PostgreSQL** — source of truth for job state, payload, results, and attempt counts.
+- **Redis** — the queue: one stream per priority (`high`/`normal`/`low`) with a shared consumer group, plus a sorted set for delayed/scheduled jobs.
+- **Worker** (N replicas) — executes job handlers. Touches **Redis** (claims and acknowledges stream messages) and **PostgreSQL** (updates job status and results).
+- **Ticker** — background maintenance process. Touches **Redis** (promotes due delayed jobs into streams, reclaims stalled in-flight messages) and **PostgreSQL** (reconciles orphaned rows, marks jobs synced).
