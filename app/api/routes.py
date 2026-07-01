@@ -11,7 +11,7 @@ from app.api.deps import get_db, get_redis
 from app.queue.delayed import schedule
 from app.queue.producer import enqueue
 from app.schemas.api import JobAccepted, JobList, JobOut, JobSubmission
-from app.schemas.enums import JobStatus, JobType
+from app.schemas.enums import JobPriority, JobStatus, JobType
 from app.schemas.payloads import validate_payload
 
 router = APIRouter()
@@ -44,18 +44,25 @@ def submit_job(
             submission.payload,
             status=JobStatus.scheduled,
             scheduled_at=scheduled_at,
+            priority=submission.priority,
         )
         schedule(client, settings.delayed_zset, str(job.id), scheduled_at.timestamp())
     else:
-        # Immediate path: persist PENDING + push to the stream.
-        job = repo.create_job(session, submission.type, submission.payload)
-        enqueue(client, settings.jobs_stream, str(job.id))
+        # Immediate path: persist PENDING + push to the priority stream.
+        job = repo.create_job(
+            session,
+            submission.type,
+            submission.payload,
+            priority=submission.priority,
+        )
+        enqueue(client, settings.stream_for_priority(submission.priority), str(job.id))
     # Handoff confirmed → flip the flag so the reconciler ignores this row.
     repo.mark_synced(session, job.id)
     return JobAccepted(
         id=job.id,
         type=job.type,
         status=job.status,
+        priority=job.priority,
         created_at=job.created_at,
         scheduled_at=job.scheduled_at,
     )
@@ -74,12 +81,18 @@ def list_jobs(
     session: Session = Depends(get_db),
     status: JobStatus | None = Query(default=None),
     type: JobType | None = Query(default=None),
+    priority: JobPriority | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     cursor: str | None = Query(default=None),
 ) -> JobList:
     try:
         jobs, next_cursor = repo.list_jobs(
-            session, status=status, job_type=type, limit=limit, cursor=cursor
+            session,
+            status=status,
+            job_type=type,
+            priority=priority,
+            limit=limit,
+            cursor=cursor,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid cursor") from exc

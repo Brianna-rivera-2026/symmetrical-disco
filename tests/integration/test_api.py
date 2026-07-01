@@ -16,10 +16,11 @@ def test_submit_creates_job_and_enqueues(client):
     assert got.status_code == 200
     assert got.json()["payload"]["to"] == "a@b.com"
 
-    # And a message was enqueued on the stream.
+    # Default priority is normal, echoed and routed to the normal stream.
+    assert body["priority"] == "normal"
     redis_client = client.app.state.redis
-    stream = client.app.state.settings.jobs_stream
-    assert redis_client.xlen(stream) == 1
+    settings = client.app.state.settings
+    assert redis_client.xlen(settings.stream_normal) == 1
 
 
 def test_submit_rejects_bad_payload(client):
@@ -73,7 +74,7 @@ def test_submit_scheduled_job_parks_in_zset(client):
     redis_client = client.app.state.redis
     settings = client.app.state.settings
     assert redis_client.zcard(settings.delayed_zset) == 1
-    assert redis_client.xlen(settings.jobs_stream) == 0
+    assert redis_client.xlen(settings.stream_normal) == 0
 
 
 def test_submit_past_scheduled_at_runs_immediately(client):
@@ -95,5 +96,43 @@ def test_submit_past_scheduled_at_runs_immediately(client):
 
     redis_client = client.app.state.redis
     settings = client.app.state.settings
-    assert redis_client.xlen(settings.jobs_stream) == 1
+    assert redis_client.xlen(settings.stream_normal) == 1
     assert redis_client.zcard(settings.delayed_zset) == 0
+
+
+def test_submit_high_priority_routes_to_high_stream(client):
+    client.app.state.redis.flushdb()
+    resp = client.post(
+        "/jobs",
+        json={
+            "type": "email",
+            "payload": {"to": "a@b.com", "subject": "Hi"},
+            "priority": "high",
+        },
+    )
+    assert resp.status_code == 202
+    assert resp.json()["priority"] == "high"
+
+    redis_client = client.app.state.redis
+    settings = client.app.state.settings
+    assert redis_client.xlen(settings.stream_high) == 1
+    assert redis_client.xlen(settings.stream_normal) == 0
+
+
+def test_list_filters_by_priority(client):
+    client.post(
+        "/jobs",
+        json={
+            "type": "email",
+            "payload": {"to": "a@b.com", "subject": "Hi"},
+            "priority": "high",
+        },
+    )
+    client.post(
+        "/jobs", json={"type": "email", "payload": {"to": "a@b.com", "subject": "Hi"}}
+    )
+    resp = client.get("/jobs", params={"priority": "high"})
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["priority"] == "high"

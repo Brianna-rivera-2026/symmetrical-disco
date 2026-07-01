@@ -21,7 +21,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        ensure_group(redis_client, settings.jobs_stream, settings.consumer_group)
+        for stream in settings.ordered_streams:
+            ensure_group(redis_client, stream, settings.consumer_group)
         yield
         redis_client.close()
         engine.dispose()

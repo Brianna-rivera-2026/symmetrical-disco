@@ -3,12 +3,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from app.schemas.enums import JobStatus, JobType
+from app.schemas.enums import JobPriority, JobStatus, JobType
 
 
 class JobSubmission(BaseModel):
     type: JobType
     payload: dict
+    priority: JobPriority = JobPriority.normal
     scheduled_at: datetime | None = None
 
     @field_validator("scheduled_at")
@@ -25,6 +26,7 @@ class JobAccepted(BaseModel):
     id: UUID
     type: JobType
     status: JobStatus
+    priority: JobPriority
     created_at: datetime
     scheduled_at: datetime | None = None
 
@@ -35,6 +37,7 @@ class JobOut(BaseModel):
     id: UUID
     type: JobType
     status: JobStatus
+    priority: JobPriority
     payload: dict
     result: dict | None
     error: dict | None
