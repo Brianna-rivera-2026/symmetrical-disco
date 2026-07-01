@@ -30,6 +30,7 @@ services:
 
   migrate:
     build: .
+    image: jobprocessor-app:${APP_TAG:-dev}
     command: alembic upgrade head
     environment:
       DATABASE_URL: postgresql+psycopg://jobs:jobs@postgres:5432/jobs
@@ -40,11 +41,13 @@ services:
 
   api:
     build: .
+    image: jobprocessor-app:${APP_TAG:-dev}
     environment:
       DATABASE_URL: postgresql+psycopg://jobs:jobs@postgres:5432/jobs
       REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
+    stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
@@ -60,8 +63,10 @@ services:
 
   worker:
     build: .
+    image: jobprocessor-app:${APP_TAG:-dev}
     command: python -m app.worker
     restart: on-failure
+    stop_grace_period: 50s
     environment:
       DATABASE_URL: postgresql+psycopg://jobs:jobs@postgres:5432/jobs
       REDIS_URL: redis://redis:6379/0
@@ -73,7 +78,9 @@ services:
 
   ticker:
     build: .
+    image: jobprocessor-app:${APP_TAG:-dev}
     command: python -m app.ticker
+    stop_grace_period: 15s
     environment:
       DATABASE_URL: postgresql+psycopg://jobs:jobs@postgres:5432/jobs
       REDIS_URL: redis://redis:6379/0
