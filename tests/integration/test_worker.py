@@ -1,3 +1,6 @@
+import os
+import signal
+import threading
 import time
 
 import pytest
@@ -147,3 +150,42 @@ def test_run_forever_drains_high_before_low(test_settings, redis_client, pg_engi
         == 0
     )
     assert redis_client.xlen(test_settings.stream_low) == 1
+
+
+def test_run_forever_drains_in_flight_job_on_real_sigterm(
+    test_settings, redis_client, pg_engine, monkeypatch
+):
+    from app.core.db import make_session_factory
+    from app.queue.consumer import ensure_group
+    from app.queue.producer import enqueue
+    from app.worker.runner import run_forever
+
+    # Let the handler run for real (not the autouse no-sleep patch) so the
+    # SIGTERM arrives while the job is still in flight.
+    monkeypatch.setattr(handlers.time, "sleep", lambda *_: _real_sleep(0.5))
+
+    for stream in test_settings.ordered_streams:
+        ensure_group(redis_client, stream, test_settings.consumer_group)
+    factory = make_session_factory(pg_engine)
+    with factory() as s:
+        job = repo.create_job(s, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    enqueue(redis_client, test_settings.stream_normal, str(job.id))
+
+    # Fire mid-handler: the worker has already claimed the job (well under
+    # 0.5s) but the handler's sleep is not yet done.
+    timer = threading.Timer(0.15, lambda: os.kill(os.getpid(), signal.SIGTERM))
+    timer.start()
+    try:
+        exit_code = run_forever(test_settings)
+    finally:
+        timer.cancel()
+
+    assert exit_code == 0
+    with factory() as s:
+        assert repo.get_job(s, job.id).status is JobStatus.completed
+    assert (
+        redis_client.xpending(test_settings.stream_normal, test_settings.consumer_group)[
+            "pending"
+        ]
+        == 0
+    )
