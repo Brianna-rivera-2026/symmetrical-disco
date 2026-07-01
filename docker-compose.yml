@@ -5,6 +5,8 @@ services:
       POSTGRES_USER: jobs
       POSTGRES_PASSWORD: jobs
       POSTGRES_DB: jobs
+    volumes:
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U jobs"]
       interval: 3s
@@ -15,6 +17,9 @@ services:
 
   redis:
     image: redis:7
+    command: redis-server --appendonly yes --appendfsync everysec
+    volumes:
+      - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
@@ -77,3 +82,7 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
