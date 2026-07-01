@@ -1,13 +1,20 @@
 from datetime import datetime, timezone
 
+import pytest
 from sqlalchemy import update
 
 from app import repository as repo
 from app.core.db import make_session_factory
+from app.jobs import handlers
 from app.models.job import Job
 from app.schemas.enums import JobStatus, JobType
 from app.worker.context import PgJobContext
 from app.worker.runner import process_job
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    monkeypatch.setattr(handlers.time, "sleep", lambda *_: None)
 
 
 def test_pg_context_writes_progress_and_reads_cancel(db_session, pg_engine):
@@ -31,7 +38,14 @@ def test_batch_completes_with_progress_100(
 ):
     sf = make_session_factory(pg_engine)
     job = repo.create_job(
-        db_session, JobType.batch, {"items": [{}, {}], "item_delay_ms": 0}
+        db_session,
+        JobType.batch,
+        {
+            "items": [
+                {"type": "email", "to": "a@b.com", "subject": "Hi"},
+                {"type": "report", "report_type": "sales"},
+            ]
+        },
     )
     outcome = process_job(db_session, redis_client, test_settings, job.id, sf)
     assert outcome.label == "completed"
@@ -39,6 +53,7 @@ def test_batch_completes_with_progress_100(
     assert job.status is JobStatus.completed
     assert job.progress == 100
     assert job.result["total"] == 2
+    assert job.result["succeeded"] == 2
 
 
 def test_tiny_batch_reaches_progress_100_without_polling(
@@ -49,7 +64,9 @@ def test_tiny_batch_reaches_progress_100_without_polling(
     settings = test_settings.model_copy(update={"cancel_poll_interval_s": 999.0})
     sf = make_session_factory(pg_engine)
     job = repo.create_job(
-        db_session, JobType.batch, {"items": [{}], "item_delay_ms": 0}
+        db_session,
+        JobType.batch,
+        {"items": [{"type": "email", "to": "a@b.com", "subject": "Hi"}]},
     )
     process_job(db_session, redis_client, settings, job.id, sf)
     db_session.refresh(job)
@@ -59,7 +76,15 @@ def test_tiny_batch_reaches_progress_100_without_polling(
 def test_batch_cooperative_cancel(db_session, redis_client, test_settings, pg_engine):
     sf = make_session_factory(pg_engine)
     job = repo.create_job(
-        db_session, JobType.batch, {"items": [{}, {}, {}], "item_delay_ms": 0}
+        db_session,
+        JobType.batch,
+        {
+            "items": [
+                {"type": "email", "to": "a@b.com", "subject": "1"},
+                {"type": "email", "to": "a@b.com", "subject": "2"},
+                {"type": "email", "to": "a@b.com", "subject": "3"},
+            ]
+        },
     )
     # Simulate "cancel arrived just as processing begins": stamp the flag on the row
     # so the handler's first poll sees it. (claim_job leaves cancel_requested_at intact.)
@@ -73,4 +98,10 @@ def test_batch_cooperative_cancel(db_session, redis_client, test_settings, pg_en
     assert outcome.label == "cancelled"
     db_session.refresh(job)
     assert job.status is JobStatus.cancelled
-    assert job.result == {"total": 3, "succeeded": 0, "failed": 0, "errors": []}
+    assert job.result == {
+        "total": 3,
+        "succeeded": 0,
+        "failed": 0,
+        "results": [],
+        "errors": [],
+    }

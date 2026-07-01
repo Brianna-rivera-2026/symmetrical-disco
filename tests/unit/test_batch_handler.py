@@ -26,7 +26,9 @@ class _FakeCtx:
 
 
 def test_batch_dispatches_real_handlers_mixed_success_and_failure(monkeypatch):
-    monkeypatch.setattr(handlers.random, "random", lambda: 0.05)  # forces webhook < 0.2 -> fail
+    monkeypatch.setattr(
+        handlers.random, "random", lambda: 0.05
+    )  # forces webhook < 0.2 -> fail
     payload = BatchPayload(
         items=[
             {"type": "email", "to": "a@b.com", "subject": "Hi"},
