@@ -283,15 +283,18 @@ the Python already present in the image (no extra `curl` dependency):
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
-      interval: 10s
-      timeout: 5s
+      interval: 15s
+      timeout: 12s
       retries: 5
       start_period: 10s
 ```
 
-`urlopen` raises on non-2xx, so a `503` (dependency down) fails the probe as
-intended. This mirrors the `pg_isready` / `redis-cli ping` healthchecks already
-on the `postgres` / `redis` services.
+`timeout: 12s` is chosen to clear the shared Redis client's 10s `socket_timeout`
+(§7): a probe waiting on a hung Redis can take up to ~10s, so a shorter
+healthcheck timeout would spuriously fail it. `interval` is set to `15s` to stay
+above the timeout. `urlopen` raises on non-2xx, so a `503` (dependency down)
+fails the probe as intended. This mirrors the `pg_isready` / `redis-cli ping`
+healthchecks already on the `postgres` / `redis` services.
 
 ## 10. Testing
 
