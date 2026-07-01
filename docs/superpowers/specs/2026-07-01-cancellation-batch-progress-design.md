@@ -425,15 +425,27 @@ never compare against the stored JSONB. Instead, at create time we store
 recompute it from the *incoming* submission:
 
 ```python
-def canonical_hash(job_type, payload) -> str:
-    blob = json.dumps({"type": job_type.value, "payload": payload},
-                      sort_keys=True, separators=(",", ":")).encode()
+def canonical_hash(job_type, payload: dict) -> str:
+    blob = json.dumps(
+        {"type": job_type.value, "payload": payload},
+        sort_keys=True, separators=(",", ":"),
+        default=str,          # defensive only — see note below
+    ).encode()
     return hashlib.sha256(blob).hexdigest()
 ```
 
 Both sides derive from submitted (pre-JSONB) payloads via identical
 canonicalization, so the comparison is stable regardless of how Postgres stores
 the value.
+
+> **On `default=str`.** `JobSubmission.payload` is a **bare `dict`** field, so
+> Pydantic leaves its contents as JSON-native primitives — `json.dumps` already
+> handles them and cannot raise `TypeError` here (there are no `UUID`/`datetime`
+> objects; `scheduled_at` is a separate field). `default=str` is therefore *cheap
+> insurance* against a future stricter `payload` type, not a fix for a live bug.
+> Note `submission.payload.model_dump(mode="json")` is **not** applicable — a
+> `dict` has no `.model_dump()`; that would only apply if `payload` were itself a
+> Pydantic model.
 
 ## 10. API & schema surface
 
