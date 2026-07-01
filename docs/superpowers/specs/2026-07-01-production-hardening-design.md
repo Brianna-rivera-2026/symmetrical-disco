@@ -39,9 +39,9 @@ Three production gaps motivate this spec (`docs/requirements/leftovers.md`):
 **Goals**
 - Persist Postgres and Redis across container recreation and `up --build` via
   named volumes; enable Redis AOF (`appendfsync everysec`).
-- Make Redis fully **rebuildable from Postgres** so the system self-heals after
-  a *total* Redis data loss (lost volume / corrupt AOF), not just a clean
-  restart.
+- Provide a documented **manual recovery playbook** to rebuild Redis from
+  Postgres after a *total* Redis data loss (lost volume / corrupt AOF), reusing
+  the existing `is_synced_to_redis` + reconcile machinery — no new automation.
 - Make redeploys **zero-loss**: in-flight jobs finish (graceful drain) rather
   than being killed and redone.
 - Document and enforce a safe **migration discipline** and a **rollback** path
@@ -54,10 +54,14 @@ Three production gaps motivate this spec (`docs/requirements/leftovers.md`):
 - **Zero-*downtime*** API. A single `api` container has a brief unavailability
   window on recreate; "zero-loss" (no dropped jobs) holds, but multi-replica +
   reverse-proxy HA is out of scope.
-- Redis clustering / replication / Sentinel. Single-node Redis with AOF +
-  Postgres rebuild is the durability model.
+- Redis clustering / replication / Sentinel. Single-node Redis with AOF, plus
+  the manual Postgres-rebuild playbook (§3.3) for total loss, is the durability
+  model.
 - Postgres HA / PITR / streaming replication. A named volume is the scope; a
   managed/replicated DB is a deployment-time swap, not designed here.
+- **Automated self-heal / bootstrap-on-startup** for a wiped Redis. Total-loss
+  recovery is a documented operator playbook (§3.3), not code — this keeps the
+  runtime free of a startup rebuild path and any `is_synced` reset semantics.
 - Health/readiness endpoints, queue-stats surfacing, stream-length trimming, and
   container resource limits — explicitly deferred (separate leftovers).
 - Surviving loss of *both* Postgres and Redis simultaneously. Postgres is the
@@ -75,43 +79,42 @@ Add a named volume `redisdata` mounted at `/data`, and run Redis with
 `--appendonly yes --appendfsync everysec`. Streams, the consumer-group PEL, and
 the `jobs:delayed` ZSET survive redeploys/restarts with a ≤1s write-loss window.
 The `everysec` fsync policy is the standard durability/throughput trade-off; the
-≤1s loss window is covered by the reconcile + reaper machinery and by the
-bootstrap rebuild below.
+≤1s loss window is covered by the reconcile + reaper machinery, and a *total*
+loss by the recovery playbook below (§3.3).
 
-### 3.3 Postgres→Redis bootstrap rebuild (backstop)
-The code change that closes gap #3. A **race-safe, idempotent bootstrap** runs
-in the **ticker** (the existing singleton that already owns reconcile/reap), once
-per fresh Redis, before its main loop:
+### 3.3 Total Redis loss — recovery playbook (documented, not automated)
+Gap #3 — already-synced `pending`/`scheduled` jobs stranded after a full Redis
+wipe — is handled **operationally**, not by startup code. The volume + AOF make
+a total loss rare; when it happens, an operator runs the playbook below, which
+reuses the existing `is_synced_to_redis` + `reconcile_orphans` machinery with no
+new code. This section is surfaced as an operator runbook per §7.
 
-1. **Detect** via an AOF-persisted sentinel key (`bootstrap_key`, default
-   `jobs:bootstrap_generation`). Present → normal restart → **skip**. Absent →
-   fresh/wiped Redis → run the rebuild.
-2. **Rebuild work (idempotent), committed first:**
-   - For every job with `status ∈ {pending, scheduled}`: set
-     `is_synced_to_redis=FALSE`.
-   - For every `processing` job whose `started_at` is older than
-     `visibility_timeout_s`: treat as `WorkerLost` via the existing
-     `schedule_retry_or_fail(...)` — its PEL entry died with the wipe, so the
-     reaper (which reads the PEL) is blind to it. Younger `processing` jobs are
-     left alone: their worker survived the wipe and will finish and commit
-     normally (its claim already won; the missing `XACK` target is harmless).
-3. **Mark done last:** `SET <bootstrap_key> <uuid> NX`.
-4. The already-running `reconcile_orphans` loop then re-derives each
-   `is_synced_to_redis=FALSE` job on its next tick: `pending` → its priority
-   stream (`enqueue`), `scheduled` → `jobs:delayed` at `scheduled_at.timestamp()`.
-   Any duplicate delivery is absorbed by the worker's idempotent claim-guard.
+**Symptoms.** Redis is empty (streams / `jobs:delayed` / consumer group missing)
+while Postgres holds live jobs; `pending`/`scheduled` rows are flagged
+`is_synced_to_redis=TRUE` with no Redis presence, and `processing` rows have lost
+their PEL entry (the reaper, which reads the PEL, is now blind to them).
 
-**Ordering rationale (work-before-sentinel):** if the ticker crashes mid-rebuild
-the sentinel is absent, so the next start re-runs the (idempotent) resets — no
-job is stranded. Two tickers racing both perform idempotent resets and one wins
-the `NX`; the loser's redundant resets are harmless. A "sentinel-first" ordering
-would risk a ticker claiming the sentinel then dying before doing the work,
-stranding every job — so it is rejected.
-
-**Interaction with new submissions:** if `api` accepts new jobs after a wipe but
-before the ticker bootstrap runs, those jobs `XADD` fresh and set
-`synced=TRUE` normally — independent of the old rows the bootstrap rebuilds. No
-conflict.
+**Steps.**
+1. **Confirm scope.** Verify Redis has no streams/ZSET/group while Postgres still
+   holds `pending`/`scheduled`/`processing` rows.
+2. **Recreate groups.** Bring the services up; `ensure_group` runs on
+   `api`/`worker`/`ticker` startup and recreates the consumer group on each
+   stream (or create them manually).
+3. **Re-arm reconcile.** Run once:
+   `UPDATE jobs SET is_synced_to_redis = FALSE WHERE status IN ('pending','scheduled');`
+   The ticker's `reconcile_orphans` (every `reconcile_interval_s`) then
+   re-derives each row — `pending` → its priority stream, `scheduled` →
+   `jobs:delayed` at `scheduled_at`. Duplicate deliveries are absorbed by the
+   worker's idempotent claim-guard.
+4. **Recover stuck `processing`.** For `processing` rows older than
+   `visibility_timeout_s` whose worker is confirmed dead, re-enqueue via the
+   retry endpoint or
+   `UPDATE jobs SET status='pending', is_synced_to_redis=FALSE WHERE id = …;`.
+   **Do not** touch `processing` rows whose worker may still be alive — that
+   worker will finish and commit normally, and resetting it risks double
+   execution.
+5. **Verify.** Watch for `ticker.reconciled count=…` logs and confirm job
+   statuses transition to `completed`/`failed`.
 
 ## 4. Part B — Zero-loss redeploys
 
@@ -152,9 +155,10 @@ covers one pass.
 
 ## 5. Data model & config changes
 
-- **No schema/migration change.** The bootstrap reuses existing columns
-  (`status`, `is_synced_to_redis`, `started_at`, `scheduled_at`).
-- **`Settings`:** add `bootstrap_key: str = "jobs:bootstrap_generation"`.
+- **No schema/migration change.**
+- **No application code change.** This work is compose configuration + docs
+  only; total-loss recovery reuses the existing reconcile path (§3.3) driven by
+  a one-off SQL `UPDATE`, not new runtime code.
 - **Compose:** two named volumes (`pgdata`, `redisdata`); Redis `command` with
   AOF flags + `redisdata:/data`; `pgdata:/var/lib/postgresql/data`;
   `stop_grace_period` on `api` (30s), `worker` (50s), `ticker` (15s); explicit
@@ -162,42 +166,43 @@ covers one pass.
 
 ## 6. Testing strategy
 
-**Unit (no Docker):**
-- Bootstrap, sentinel **absent**: given a set of jobs across statuses + a mock
-  Redis, asserts `is_synced_to_redis` is reset to `FALSE` for `pending`/
-  `scheduled`, `processing` older than `visibility_timeout_s` is routed through
-  `schedule_retry_or_fail`, younger `processing` is untouched, and the sentinel
-  is `SET … NX` afterward.
-- Bootstrap, sentinel **present**: no-op (no status/flag writes, no `NX`).
-- Ordering/idempotency: a simulated crash after resets but before the `NX` leaves
-  resets applied and re-runs cleanly on the next call.
+**Unit (no Docker):** none — this change adds no application code.
 
 **Integration (testcontainers):**
 1. **Restart-with-volume:** submit jobs, restart the Redis container keeping the
-   volume, assert jobs still complete (no rebuild needed — sentinel survived).
-2. **Total Redis loss:** submit `pending` + `scheduled` jobs, `FLUSHALL` Redis,
-   run the ticker → assert streams + `jobs:delayed` are rebuilt and all jobs
-   eventually complete.
-3. **Graceful drain:** start a long `report` job, send SIGTERM to the worker →
+   volume, assert jobs still complete (state survived via the volume + AOF).
+2. **Graceful drain:** start a long `report` job, send SIGTERM to the worker →
    assert the job completes, worker exits 0, and the message is not redelivered.
+
+**Manual (playbook validation):**
+- **Total Redis loss:** submit `pending` + `scheduled` jobs, `FLUSHALL` Redis,
+  then run the §3.3 playbook steps → confirm streams + `jobs:delayed` are rebuilt
+  and all jobs eventually complete. Run once by hand to validate the runbook; it
+  is not part of the automated suite (there is no code path to assert against).
 
 ## 7. Rollout & docs
 
-- Update `DECISIONS.md`: persistence stance (PG volume + Redis AOF + Postgres
-  rebuild backstop), drain policy, migration discipline/rollback.
+- Update `DECISIONS.md`: persistence stance (PG volume + Redis AOF; total-loss
+  recovery is a manual playbook, not automated self-heal), drain policy,
+  migration discipline/rollback.
 - Update `README.md`: volumes, what survives `up --build` vs `down -v`, redeploy
-  drain behavior.
+  drain behavior, and a pointer to the §3.3 recovery playbook (mirror it into a
+  `docs/runbooks/` entry so operators can find it without the design doc).
 - Tick off the corresponding `docs/requirements/leftovers.md` items.
 
 ## 8. Risks & mitigations
 
-- **AOF ≤1s write-loss window.** Mitigated by reconcile (unsynced rows) + the
-  bootstrap rebuild (total loss) — no durable job depends solely on the AOF tail.
+- **AOF ≤1s write-loss window.** Mitigated by reconcile (unsynced rows); for a
+  *total* loss the manual §3.3 playbook rebuilds from Postgres. No durable job
+  depends solely on the AOF tail.
+- **Total Redis loss requires manual intervention.** Recovery is not automatic:
+  until an operator runs the §3.3 playbook, affected `pending`/`scheduled` jobs
+  stay stuck. Accepted trade-off for keeping the runtime simple — the volume +
+  AOF make total loss rare.
 - **Longer deploys.** Graceful drain adds up to ~50s per worker to a redeploy.
   Accepted: it is bounded (one handler) and avoids redone work + redelivery churn.
-- **Double-execution on rebuild.** Re-deriving a job that still has a live
-  message would double-deliver, but the claim-guard makes redelivery a no-op, so
-  the rebuild is safe even if it overlaps a partially-surviving Redis.
-- **Simultaneous worker + Redis loss of an in-flight job** beyond the
-  `visibility_timeout_s` window is recovered by the bootstrap's stale-`processing`
-  sweep; within the window it is left to the surviving worker / normal reaper.
+- **Double-execution during playbook recovery.** Re-arming a job that still has a
+  live message would double-deliver, but the claim-guard makes redelivery a
+  no-op, so step 3 is safe even against a partially-surviving Redis. Step 4's
+  `processing` reset is the one manual judgement call — gated on "worker
+  confirmed dead" to avoid racing a live worker.
