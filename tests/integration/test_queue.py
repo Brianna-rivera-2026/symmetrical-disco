@@ -1,4 +1,4 @@
-from app.queue.consumer import ack, ensure_group, read_one, read_priority
+from app.queue.consumer import ack, ensure_group, read_priority
 from app.queue.producer import enqueue
 
 STREAM = "jobs:stream"
@@ -14,23 +14,16 @@ def test_enqueue_read_ack_cycle(redis_client):
     ensure_group(redis_client, STREAM, GROUP)
     enqueue(redis_client, STREAM, "job-123")
 
-    msg = read_one(redis_client, STREAM, GROUP, "consumer-a", block_ms=1000)
-    assert msg is not None
-    message_id, fields = msg
+    batch = read_priority(redis_client, [STREAM], GROUP, "consumer-a", block_ms=1000)
+    assert len(batch) == 1
+    stream, message_id, fields = batch[0]
     assert fields["job_id"] == "job-123"
 
     # Still pending until acked.
-    pending = redis_client.xpending(STREAM, GROUP)
-    assert pending["pending"] == 1
+    assert redis_client.xpending(STREAM, GROUP)["pending"] == 1
 
-    ack(redis_client, STREAM, GROUP, message_id)
-    pending_after = redis_client.xpending(STREAM, GROUP)
-    assert pending_after["pending"] == 0
-
-
-def test_read_returns_none_when_empty(redis_client):
-    ensure_group(redis_client, STREAM, GROUP)
-    assert read_one(redis_client, STREAM, GROUP, "consumer-a", block_ms=100) is None
+    ack(redis_client, stream, GROUP, message_id)
+    assert redis_client.xpending(STREAM, GROUP)["pending"] == 0
 
 
 PRIO_STREAMS = ["s:high", "s:normal", "s:low"]

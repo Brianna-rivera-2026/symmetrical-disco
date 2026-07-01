@@ -10,7 +10,6 @@ class Settings(BaseSettings):
 
     database_url: str
     redis_url: str
-    jobs_stream: str = "jobs:stream"
     stream_high: str = "jobs:stream:high"
     stream_normal: str = "jobs:stream:normal"
     stream_low: str = "jobs:stream:low"
