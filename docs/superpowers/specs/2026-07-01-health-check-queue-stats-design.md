@@ -167,9 +167,11 @@ On `client.pipeline(transaction=False)`, queued once and `.execute()`d:
 
 **Lag fallback.** `lag` can be `nil` if Redis cannot compute it (only after
 entries are deleted — which this system never does, so it is effectively always
-present). Defensive order: use `lag` when numeric; else derive
-`entries-added − entries-read` from `XINFO STREAM` / group fields; else report
-`depth: null` rather than raising.
+present). Implementation: use `lag` when numeric, else report `depth: null`
+rather than raising or erroring. A three-way fallback that additionally derived
+`entries-added − entries-read` from `XINFO STREAM` was considered but dropped —
+since `lag` is effectively always present here, that middle tier would be dead
+code for an extra `XINFO STREAM` call per stream.
 
 **Group-not-found.** If a priority stream/group does not exist yet (fresh
 deploy before any job of that priority), treat that stream's `depth`/`in_flight`
