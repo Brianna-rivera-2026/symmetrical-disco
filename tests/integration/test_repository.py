@@ -218,3 +218,18 @@ def test_get_priorities_batched(db_session):
 
 def test_get_priorities_empty_returns_empty(db_session):
     assert repo.get_priorities(db_session, []) == {}
+
+
+def test_create_job_defaults_attempts(db_session):
+    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    db_session.refresh(job)
+    assert job.attempts == 0
+    assert job.max_attempts == 4
+
+
+def test_create_job_sets_max_attempts(db_session):
+    job = repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, max_attempts=2
+    )
+    db_session.refresh(job)
+    assert job.max_attempts == 2

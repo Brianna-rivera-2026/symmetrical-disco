@@ -21,6 +21,7 @@ def create_job(
     status: JobStatus = JobStatus.pending,
     scheduled_at: datetime | None = None,
     priority: JobPriority = JobPriority.normal,
+    max_attempts: int = 4,
 ) -> Job:
     job = Job(
         type=job_type,
@@ -28,6 +29,7 @@ def create_job(
         status=status,
         scheduled_at=scheduled_at,
         priority=priority,
+        max_attempts=max_attempts,
     )
     session.add(job)
     session.commit()

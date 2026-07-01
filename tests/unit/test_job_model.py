@@ -20,6 +20,8 @@ def test_job_table_and_columns():
         "scheduled_at",
         "is_synced_to_redis",
         "priority",
+        "attempts",
+        "max_attempts",
     }
 
 

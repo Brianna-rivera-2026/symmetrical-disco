@@ -33,6 +33,12 @@ class Job(Base):
     )
     result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    attempts: Mapped[int] = mapped_column(
+        sa.Integer, nullable=False, default=0, server_default="0"
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        sa.Integer, nullable=False, default=4, server_default="4"
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now()
     )
@@ -53,4 +59,6 @@ class Job(Base):
         kwargs.setdefault("id", uuid.uuid4())
         kwargs.setdefault("status", JobStatus.pending)
         kwargs.setdefault("priority", JobPriority.normal)
+        kwargs.setdefault("attempts", 0)
+        kwargs.setdefault("max_attempts", 4)
         super().__init__(**kwargs)
