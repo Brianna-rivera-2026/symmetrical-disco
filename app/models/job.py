@@ -3,7 +3,7 @@ from datetime import datetime
 
 import sqlalchemy as sa
 from sqlalchemy import Boolean, Enum as SAEnum
-from sqlalchemy import TIMESTAMP, func
+from sqlalchemy import Index, TIMESTAMP, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -53,6 +53,21 @@ class Job(Base):
     )
     is_synced_to_redis: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=sa.false()
+    )
+    progress: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_jobs_idempotency_key",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=sa.text("idempotency_key IS NOT NULL"),
+        ),
     )
 
     def __init__(self, **kwargs: object) -> None:

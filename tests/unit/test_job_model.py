@@ -22,6 +22,10 @@ def test_job_table_and_columns():
         "priority",
         "attempts",
         "max_attempts",
+        "progress",
+        "cancel_requested_at",
+        "idempotency_key",
+        "idempotency_hash",
     }
 
 

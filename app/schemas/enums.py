@@ -5,6 +5,7 @@ class JobType(str, Enum):
     email = "email"
     webhook = "webhook"
     report = "report"
+    batch = "batch"
 
 
 class JobStatus(str, Enum):
