@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.schemas.enums import JobPriority
@@ -22,6 +23,22 @@ class Settings(BaseSettings):
     reconcile_grace_s: float = 10.0
     reconcile_batch_size: int = 500
     log_level: str = "INFO"
+    job_handler_timeout_s: float = 45.0
+    visibility_timeout_s: float = 60.0
+    reaper_interval_s: float = 30.0
+    reaper_batch_size: int = 100
+    max_attempts: int = 4
+    retry_backoff_schedule: list[int] = [0, 30, 120]
+    max_handler_timeouts_before_recycle: int = 1
+
+    @model_validator(mode="after")
+    def _check_timeout_invariant(self) -> "Settings":
+        if self.job_handler_timeout_s >= self.visibility_timeout_s:
+            raise ValueError(
+                "job_handler_timeout_s must be < visibility_timeout_s "
+                f"(got {self.job_handler_timeout_s} >= {self.visibility_timeout_s})"
+            )
+        return self
 
     @property
     def ordered_streams(self) -> list[str]:

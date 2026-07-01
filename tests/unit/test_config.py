@@ -72,3 +72,29 @@ def test_stream_for_priority_maps_each_level():
     assert s.stream_for_priority(JobPriority.high) == "jobs:stream:high"
     assert s.stream_for_priority(JobPriority.normal) == "jobs:stream:normal"
     assert s.stream_for_priority(JobPriority.low) == "jobs:stream:low"
+
+
+def test_failure_handling_defaults():
+    s = Settings(
+        database_url="postgresql+psycopg://u:p@h/db", redis_url="redis://h:6379/0"
+    )
+    assert s.job_handler_timeout_s == 45.0
+    assert s.visibility_timeout_s == 60.0
+    assert s.reaper_interval_s == 30.0
+    assert s.reaper_batch_size == 100
+    assert s.max_attempts == 4
+    assert s.retry_backoff_schedule == [0, 30, 120]
+    assert s.max_handler_timeouts_before_recycle == 1
+
+
+def test_timeout_invariant_rejects_handler_ge_visibility():
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Settings(
+            database_url="postgresql+psycopg://u:p@h/db",
+            redis_url="redis://h:6379/0",
+            job_handler_timeout_s=60.0,
+            visibility_timeout_s=60.0,
+        )
