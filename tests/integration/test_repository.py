@@ -163,3 +163,58 @@ def test_list_unsynced_filters_synced_and_grace(db_session):
         db_session, older_than=now - timedelta(seconds=1000), limit=100
     )
     assert none_rows == []
+
+
+def test_create_job_defaults_priority_normal(db_session):
+    from app.schemas.enums import JobPriority
+
+    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    assert job.priority is JobPriority.normal
+
+
+def test_create_job_sets_priority(db_session):
+    from app.schemas.enums import JobPriority
+
+    job = repo.create_job(
+        db_session,
+        JobType.email,
+        {"to": "a@b.com", "subject": "Hi"},
+        priority=JobPriority.high,
+    )
+    db_session.refresh(job)
+    assert job.priority is JobPriority.high
+
+
+def test_list_filters_by_priority(db_session):
+    from app.schemas.enums import JobPriority
+
+    repo.create_job(
+        db_session,
+        JobType.email,
+        {"to": "a@b.com", "subject": "Hi"},
+        priority=JobPriority.high,
+    )
+    repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+
+    highs, _ = repo.list_jobs(db_session, priority=JobPriority.high)
+    assert len(highs) == 1
+    assert highs[0].priority is JobPriority.high
+
+
+def test_get_priorities_batched(db_session):
+    from app.schemas.enums import JobPriority
+
+    a = repo.create_job(
+        db_session,
+        JobType.email,
+        {"to": "a@b.com", "subject": "Hi"},
+        priority=JobPriority.high,
+    )
+    b = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+
+    result = repo.get_priorities(db_session, [a.id, b.id])
+    assert result == {a.id: JobPriority.high, b.id: JobPriority.normal}
+
+
+def test_get_priorities_empty_returns_empty(db_session):
+    assert repo.get_priorities(db_session, []) == {}

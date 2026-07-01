@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.cursor import decode_cursor, encode_cursor
 from app.models.job import Job
-from app.schemas.enums import JobStatus, JobType
+from app.schemas.enums import JobPriority, JobStatus, JobType
 
 
 def _now() -> datetime:
@@ -20,8 +20,15 @@ def create_job(
     *,
     status: JobStatus = JobStatus.pending,
     scheduled_at: datetime | None = None,
+    priority: JobPriority = JobPriority.normal,
 ) -> Job:
-    job = Job(type=job_type, payload=payload, status=status, scheduled_at=scheduled_at)
+    job = Job(
+        type=job_type,
+        payload=payload,
+        status=status,
+        scheduled_at=scheduled_at,
+        priority=priority,
+    )
     session.add(job)
     session.commit()
     session.refresh(job)
@@ -37,6 +44,7 @@ def list_jobs(
     *,
     status: JobStatus | None = None,
     job_type: JobType | None = None,
+    priority: JobPriority | None = None,
     limit: int = 50,
     cursor: str | None = None,
 ) -> tuple[list[Job], str | None]:
@@ -45,6 +53,8 @@ def list_jobs(
         stmt = stmt.where(Job.status == status)
     if job_type is not None:
         stmt = stmt.where(Job.type == job_type)
+    if priority is not None:
+        stmt = stmt.where(Job.priority == priority)
     if cursor is not None:
         c_created, c_id = decode_cursor(cursor)
         stmt = stmt.where(tuple_(Job.created_at, Job.id) < (c_created, c_id))
@@ -120,3 +130,12 @@ def list_unsynced(session: Session, *, older_than: datetime, limit: int) -> list
         .limit(limit)
     )
     return list(session.execute(stmt).scalars())
+
+
+def get_priorities(session: Session, job_ids: list[UUID]) -> dict[UUID, JobPriority]:
+    if not job_ids:
+        return {}
+    rows = session.execute(
+        select(Job.id, Job.priority).where(Job.id.in_(job_ids))
+    ).all()
+    return {row.id: row.priority for row in rows}
