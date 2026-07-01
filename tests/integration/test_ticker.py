@@ -170,7 +170,7 @@ def test_end_to_end_scheduled_job_completes(
 
     factory = make_session_factory(pg_engine)
     with factory() as s:
-        process_job(s, job.id)
+        process_job(s, redis_client, test_settings, job.id)
         refreshed = repo.get_job(s, job.id)
     assert refreshed.status is JobStatus.completed
 
@@ -208,11 +208,15 @@ def test_duplicate_promotion_second_claim_is_noop(
     # Stream has 2 entries for the same job; process both.
     factory = make_session_factory(pg_engine)
     with factory() as s:
-        process_job(s, job.id)  # First delivery: claim succeeds, job completes.
+        process_job(
+            s, redis_client, test_settings, job.id
+        )  # First delivery: claim succeeds, job completes.
         first_result = repo.get_job(s, job.id).result
 
     with factory() as s:
-        process_job(s, job.id)  # Second delivery: claim guard rejects, no-op.
+        process_job(
+            s, redis_client, test_settings, job.id
+        )  # Second delivery: claim guard rejects, no-op.
         refreshed = repo.get_job(s, job.id)
 
     assert refreshed.status is JobStatus.completed

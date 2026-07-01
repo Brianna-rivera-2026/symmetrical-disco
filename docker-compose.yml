@@ -49,6 +49,7 @@ services:
   worker:
     build: .
     command: python -m app.worker
+    restart: on-failure
     environment:
       DATABASE_URL: postgresql+psycopg://jobs:jobs@postgres:5432/jobs
       REDIS_URL: redis://redis:6379/0
