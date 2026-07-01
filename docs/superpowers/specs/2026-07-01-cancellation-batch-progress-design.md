@@ -6,6 +6,13 @@
 backoff, worker timeout + recycle, the reaper/reconciler, guarded
 `processing → terminal` transitions, `POST /jobs/{id}/retry`).
 
+> **Superseded in part:** §5 (Config additions) and §8 (Batch handler & worker
+> wiring) describe the original opaque-`dict` batch items and the timeout-budget
+> validator. Both were replaced by
+> `docs/superpowers/specs/2026-07-01-batch-items-as-real-jobs-design.md`, which
+> makes each batch item a real email/webhook/report sub-job. The rest of this
+> document (cancellation, progress, idempotency) is unaffected and still current.
+
 ## 1. Context & current state
 
 Today a job flows: `POST /jobs` validates the payload, `create_job` commits the
