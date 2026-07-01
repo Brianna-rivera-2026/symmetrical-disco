@@ -2,12 +2,14 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 import redis
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import repository as repo
 from app.api.deps import get_db, get_redis
+from app.idempotency import canonical_hash
 from app.queue.delayed import schedule
 from app.queue.producer import enqueue
 from app.schemas.api import JobAccepted, JobList, JobOut, JobSubmission
@@ -22,22 +24,9 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-@router.post("/jobs", response_model=JobAccepted, status_code=202)
-def submit_job(
-    submission: JobSubmission,
-    request: Request,
-    session: Session = Depends(get_db),
-    client: redis.Redis = Depends(get_redis),
-) -> JobAccepted:
-    try:
-        validate_payload(submission.type, submission.payload)
-    except (ValidationError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    settings = request.app.state.settings
+def _create_and_handoff(session, client, settings, submission, key, req_hash):
     scheduled_at = submission.scheduled_at
     if scheduled_at is not None and scheduled_at > datetime.now(timezone.utc):
-        # Scheduled path: persist SCHEDULED + park in the delayed ZSET.
         job = repo.create_job(
             session,
             submission.type,
@@ -46,20 +35,26 @@ def submit_job(
             scheduled_at=scheduled_at,
             priority=submission.priority,
             max_attempts=settings.max_attempts,
+            idempotency_key=key,
+            idempotency_hash=req_hash,
         )
         schedule(client, settings.delayed_zset, str(job.id), scheduled_at.timestamp())
     else:
-        # Immediate path: persist PENDING + push to the priority stream.
         job = repo.create_job(
             session,
             submission.type,
             submission.payload,
             priority=submission.priority,
             max_attempts=settings.max_attempts,
+            idempotency_key=key,
+            idempotency_hash=req_hash,
         )
         enqueue(client, settings.stream_for_priority(submission.priority), str(job.id))
-    # Handoff confirmed → flip the flag so the reconciler ignores this row.
     repo.mark_synced(session, job.id)
+    return job
+
+
+def _accepted(job) -> JobAccepted:
     return JobAccepted(
         id=job.id,
         type=job.type,
@@ -68,6 +63,54 @@ def submit_job(
         created_at=job.created_at,
         scheduled_at=job.scheduled_at,
     )
+
+
+def _replay_or_conflict(existing, req_hash, response) -> JobAccepted:
+    if existing is not None and existing.idempotency_hash == req_hash:
+        response.status_code = 200
+        return _accepted(existing)
+    raise HTTPException(
+        status_code=409, detail="idempotency key reused with a different payload"
+    )
+
+
+@router.post("/jobs", response_model=JobAccepted, status_code=202)
+def submit_job(
+    submission: JobSubmission,
+    request: Request,
+    response: Response,
+    session: Session = Depends(get_db),
+    client: redis.Redis = Depends(get_redis),
+) -> JobAccepted:
+    settings = request.app.state.settings
+    try:
+        validate_payload(
+            submission.type,
+            submission.payload,
+            context={
+                "handler_timeout_s": settings.job_handler_timeout_s,
+                "safety_factor": settings.batch_timeout_safety_factor,
+            },
+        )
+    except (ValidationError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    key = submission.idempotency_key
+    if key is None:
+        job = _create_and_handoff(session, client, settings, submission, None, None)
+        return _accepted(job)
+
+    req_hash = canonical_hash(submission.type, submission.payload)
+    existing = repo.get_by_idempotency_key(session, key)
+    if existing is not None:
+        return _replay_or_conflict(existing, req_hash, response)
+    try:
+        job = _create_and_handoff(session, client, settings, submission, key, req_hash)
+    except IntegrityError:
+        session.rollback()
+        existing = repo.get_by_idempotency_key(session, key)
+        return _replay_or_conflict(existing, req_hash, response)
+    return _accepted(job)
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut)

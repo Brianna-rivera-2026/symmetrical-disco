@@ -11,6 +11,7 @@ class JobSubmission(BaseModel):
     payload: dict
     priority: JobPriority = JobPriority.normal
     scheduled_at: datetime | None = None
+    idempotency_key: str | None = None
 
     @field_validator("scheduled_at")
     @classmethod
