@@ -4,6 +4,7 @@ import uuid
 import redis
 
 CONSUMER_NAME = f"worker_{os.getenv('HOSTNAME', 'local')}_{uuid.uuid4().hex[:6]}"
+REAPER_NAME = "reaper"
 
 
 def ensure_group(client: redis.Redis, stream: str, group: str) -> None:

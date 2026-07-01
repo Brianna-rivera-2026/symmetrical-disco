@@ -13,8 +13,9 @@ from app.core.config import Settings
 from app.core.db import make_engine, make_session_factory
 from app.core.redis import create_redis_client
 from app.queue import delayed
-from app.queue.consumer import ensure_group
+from app.queue.consumer import REAPER_NAME, ensure_group
 from app.queue.producer import enqueue
+from app.retry import schedule_retry_or_fail
 from app.schemas.enums import JobStatus
 
 log = structlog.get_logger("ticker")
@@ -77,6 +78,73 @@ def reconcile_orphans(session: Session, client: redis.Redis, settings: Settings)
     return total
 
 
+def _reap_one(session, client, settings, stream, message_id, job_id) -> None:
+    job = repo.get_job(session, job_id)
+    if job is not None:
+        if job.status in (JobStatus.completed, JobStatus.failed):
+            pass  # ghost: worker finished, XACK was dropped
+        elif job.status is JobStatus.processing:
+            schedule_retry_or_fail(
+                session,
+                client,
+                settings,
+                job,
+                {"type": "WorkerLost", "message": "reclaimed by reaper"},
+            )
+        elif not job.is_synced_to_redis:
+            # Worker won the guard then died before the Redis handoff → finish it
+            # inline (immediate recovery). Do NOT touch attempts / re-decide.
+            if job.status is JobStatus.scheduled and job.scheduled_at is not None:
+                delayed.schedule(
+                    client,
+                    settings.delayed_zset,
+                    str(job.id),
+                    job.scheduled_at.timestamp(),
+                )
+            else:
+                enqueue(client, settings.stream_for_priority(job.priority), str(job.id))
+            repo.mark_synced(session, job.id)
+        # else: pending/scheduled + synced=True → fresh message already live
+    # Always clear the reclaimed entry from the PEL.
+    client.xack(stream, settings.consumer_group, message_id)
+
+
+def reap_stale(session: Session, client: redis.Redis, settings: Settings) -> int:
+    min_idle = int(settings.visibility_timeout_s * 1000)
+    handled = 0
+    for stream in settings.ordered_streams:
+        # XAUTOCLAIM raises NOGROUP against a stream/group that doesn't exist
+        # yet; guard it the same way every other consumer-group reader in this
+        # codebase does (main.py, worker/runner.py, run_forever's own startup).
+        ensure_group(client, stream, settings.consumer_group)
+        cursor = "0-0"
+        while True:
+            resp = client.xautoclaim(
+                name=stream,
+                groupname=settings.consumer_group,
+                consumername=REAPER_NAME,
+                min_idle_time=min_idle,
+                start_id=cursor,
+                count=settings.reaper_batch_size,
+            )
+            cursor, messages = resp[0], resp[1]
+            for message_id, fields in messages:
+                _reap_one(
+                    session,
+                    client,
+                    settings,
+                    stream,
+                    message_id,
+                    UUID(fields["job_id"]),
+                )
+                handled += 1
+            if cursor == "0-0":
+                break
+    if handled:
+        log.info("ticker.reaped", count=handled)
+    return handled
+
+
 def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -> None:
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
@@ -101,6 +169,7 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
         "ticker.started", zset=settings.delayed_zset, streams=settings.ordered_streams
     )
     last_reconcile = 0.0
+    last_reap = 0.0
 
     while not _should_stop():
         try:
@@ -113,6 +182,10 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
                 last_reconcile = now
                 if recovered:
                     log.info("ticker.reconciled", count=recovered)
+            if now - last_reap >= settings.reaper_interval_s:
+                with session_factory() as session:
+                    reap_stale(session, client, settings)
+                last_reap = now
             # Full batch → drain immediately without sleeping
             if promoted >= settings.ticker_batch_size:
                 continue
