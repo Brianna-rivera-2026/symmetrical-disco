@@ -69,3 +69,59 @@ Both can be added in Phase 2 without breaking the current architecture.
 This eliminates the orphan gap entirely. The sweeper is idempotent (checking if a job is already in Redis before re-enqueuing), so even if it processes the same outbox row twice, the outcome is correct.
 
 **Why not now:** It adds a worker process and monitoring logic (is the sweeper running? how far behind is it?). For Phase 1, commit-then-XADD with eventual manual recovery is acceptable. Phase 2's reaper makes it explicit and automatable.
+
+---
+
+## 6. Persistence, Redeploys & Recovery
+
+**Approach chosen:** Named Docker volumes for Postgres (`pgdata`) and Redis
+(`redisdata`) + Redis AOF (`appendfsync everysec`); `stop_grace_period` tuned
+per service to the existing (already-implemented) SIGTERM drain behavior;
+explicit `image:` tags for rollback; total-Redis-loss recovery is a
+**documented manual playbook**, not new automation.
+
+**Why:**
+- Volumes + AOF close the biggest gap: without them, any container
+  recreation (including a routine `docker compose up --build`) wiped all job
+  and queue state.
+- The worker already traps SIGTERM and finishes its one in-flight job before
+  exiting (`app/worker/runner.py`); the only missing piece was compose's
+  `stop_grace_period`, which defaulted to Docker's 10s and forced a SIGKILL on
+  any `report` job (45s handler timeout) during a redeploy.
+- We deliberately did **not** build an automated Redis-rebuild-on-startup
+  path. `reconcile_orphans` only re-syncs rows flagged
+  `is_synced_to_redis = FALSE`, so a *total* Redis wipe (not just a restart —
+  AOF + the volume already cover restarts) strands already-synced
+  `pending`/`scheduled` jobs. An automated fix would need new startup code,
+  new reset semantics on `is_synced_to_redis`, and a race-safe sentinel — real
+  complexity for a failure mode the volume + AOF already make rare. See
+  `docs/runbooks/redis-total-loss-recovery.md` for the manual procedure.
+- We also deliberately did **not** write automated tests asserting the
+  `docker-compose.yml` config itself (volumes, AOF, `stop_grace_period`) —
+  config-only changes are verified manually. An early attempt at an automated
+  real-OS-SIGTERM regression test hit a Windows-only trap
+  (`os.kill(pid, SIGTERM)` hard-kills via `TerminateProcess` on Windows
+  instead of invoking the registered handler) that a manual check never would
+  have hit.
+
+**Trade-offs:**
+- **Deploy latency:** the worker's `stop_grace_period: 50s` means a redeploy
+  can take up to 50s per worker if a long job is in flight. Accepted — bounded
+  to one handler, and it avoids redone work and redelivery churn.
+- **Manual recovery step:** a total Redis loss requires an operator to run the
+  runbook; it does not self-heal. Accepted given how rare a total loss is once
+  the volume + AOF are in place.
+- **API downtime, not just data-loss, on recreate:** a single `api` container
+  briefly stops accepting requests during `up --build`; "zero-loss" (no
+  dropped jobs — `commit-then-XADD` already makes this safe) holds, but
+  "zero-downtime" would need multiple `api` replicas behind a proxy, which is
+  out of scope here.
+- **Migration discipline:** because `api`/`worker`/`ticker` are recreated
+  independently during a redeploy, old and new code briefly run against the
+  same schema. Migrations in this project follow **expand/contract**:
+  additive-only within a release (new nullable columns, new tables); a column
+  or constraint the previous release's code still reads is only dropped in a
+  *later* release, after that code is fully retired. Combined with explicit
+  `image:` tags, this means rolling back to the previous image is always safe
+  — it runs against the newer, backward-compatible schema without needing a
+  down-migration.

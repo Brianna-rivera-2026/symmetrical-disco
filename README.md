@@ -198,3 +198,31 @@ curl "http://localhost:8000/jobs?type=email&status=completed&limit=20&cursor=eyJ
 - **Redis** — the queue: one stream per priority (`high`/`normal`/`low`) with a shared consumer group, plus a sorted set for delayed/scheduled jobs.
 - **Worker** (N replicas) — executes job handlers. Touches **Redis** (claims and acknowledges stream messages) and **PostgreSQL** (updates job status and results).
 - **Ticker** — background maintenance process. Touches **Redis** (promotes due delayed jobs into streams, reclaims stalled in-flight messages) and **PostgreSQL** (reconciles orphaned rows, marks jobs synced).
+
+## Persistence & Deployment
+
+Postgres (`pgdata`) and Redis (`redisdata`) both use named Docker volumes, and
+Redis runs with AOF persistence (`appendfsync everysec`). Job history and
+queue state (streams, the consumer-group PEL, the delayed-jobs ZSET) survive
+`docker compose down` / `up --build` and container restarts. Only an explicit
+`docker compose down -v` destroys them.
+
+**Redeploys drain gracefully.** `worker`, `api`, and `ticker` all trap SIGTERM
+and finish in-flight work before exiting; each service's `stop_grace_period`
+in `docker-compose.yml` is set above its worst-case drain time (the worker's
+50s covers the 45s handler timeout) so Docker's SIGKILL never arrives mid-job
+during a normal redeploy.
+
+**Rollback:** each buildable service shares an explicit `image:
+jobprocessor-app:${APP_TAG:-dev}` tag. Tag a release with
+`APP_TAG=v1.2.0 docker compose build`, deploy it with
+`APP_TAG=v1.2.0 docker compose up -d`, and roll back by re-running `up -d`
+with the previous `APP_TAG`. This is safe because migrations in this project
+are additive-only within a release (see `DECISIONS.md` §6) — an older image
+never breaks against a newer schema.
+
+**If Redis ever loses all its data** (e.g., the volume itself is deleted),
+recovery is a manual procedure — see
+[`docs/runbooks/redis-total-loss-recovery.md`](docs/runbooks/redis-total-loss-recovery.md).
+
+For the full system design, see the [Phase 1 design](docs/superpowers/specs/2026-06-30-job-processing-phase1-design.md); for the persistence, redeploy-drain, and migration-discipline hardening described above, see [the production-hardening design](docs/superpowers/specs/2026-07-01-production-hardening-design.md).
