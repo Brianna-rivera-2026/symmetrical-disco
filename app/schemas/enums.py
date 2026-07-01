@@ -14,3 +14,9 @@ class JobStatus(str, Enum):
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
+
+
+class JobPriority(str, Enum):
+    high = "high"
+    normal = "normal"
+    low = "low"

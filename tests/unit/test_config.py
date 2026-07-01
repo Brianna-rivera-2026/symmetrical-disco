@@ -29,3 +29,47 @@ def test_settings_env_override(monkeypatch):
     monkeypatch.setenv("BLOCK_MS", "1000")
     s = Settings()
     assert s.block_ms == 1000
+
+
+def test_job_priority_values():
+    from app.schemas.enums import JobPriority
+
+    assert [p.value for p in JobPriority] == ["high", "normal", "low"]
+
+
+def test_priority_stream_defaults():
+    s = Settings(
+        database_url="postgresql+psycopg://u:p@h/db", redis_url="redis://h:6379/0"
+    )
+    assert s.stream_high == "jobs:stream:high"
+    assert s.stream_normal == "jobs:stream:normal"
+    assert s.stream_low == "jobs:stream:low"
+    assert s.ordered_streams == [
+        "jobs:stream:high",
+        "jobs:stream:normal",
+        "jobs:stream:low",
+    ]
+
+
+def test_priority_streams_ordering():
+    from app.schemas.enums import JobPriority
+
+    s = Settings(
+        database_url="postgresql+psycopg://u:p@h/db", redis_url="redis://h:6379/0"
+    )
+    assert s.priority_streams == [
+        (JobPriority.high, "jobs:stream:high"),
+        (JobPriority.normal, "jobs:stream:normal"),
+        (JobPriority.low, "jobs:stream:low"),
+    ]
+
+
+def test_stream_for_priority_maps_each_level():
+    from app.schemas.enums import JobPriority
+
+    s = Settings(
+        database_url="postgresql+psycopg://u:p@h/db", redis_url="redis://h:6379/0"
+    )
+    assert s.stream_for_priority(JobPriority.high) == "jobs:stream:high"
+    assert s.stream_for_priority(JobPriority.normal) == "jobs:stream:normal"
+    assert s.stream_for_priority(JobPriority.low) == "jobs:stream:low"
