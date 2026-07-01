@@ -29,6 +29,7 @@ def promote_due(session: Session, client: redis.Redis, settings: Settings) -> in
         return 0
     delayed.promote(client, settings.jobs_stream, settings.delayed_zset, ids)
     repo.promote_scheduled_to_pending(session, [UUID(i) for i in ids])
+    log.info("ticker.promoted", count=len(ids), job_ids=ids)
     return len(ids)
 
 
