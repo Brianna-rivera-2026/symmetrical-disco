@@ -8,3 +8,5 @@ build/
 .env
 .pytest_cache/
 .ruff_cache/
+.superpowers/
+.claude
