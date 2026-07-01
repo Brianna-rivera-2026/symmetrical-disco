@@ -45,6 +45,7 @@ def submit_job(
             status=JobStatus.scheduled,
             scheduled_at=scheduled_at,
             priority=submission.priority,
+            max_attempts=settings.max_attempts,
         )
         schedule(client, settings.delayed_zset, str(job.id), scheduled_at.timestamp())
     else:
@@ -54,6 +55,7 @@ def submit_job(
             submission.type,
             submission.payload,
             priority=submission.priority,
+            max_attempts=settings.max_attempts,
         )
         enqueue(client, settings.stream_for_priority(submission.priority), str(job.id))
     # Handoff confirmed → flip the flag so the reconciler ignores this row.
@@ -73,6 +75,27 @@ def get_job(job_id: UUID, session: Session = Depends(get_db)) -> JobOut:
     job = repo.get_job(session, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
+    return JobOut.model_validate(job)
+
+
+@router.post("/jobs/{job_id}/retry", response_model=JobOut)
+def retry_job(
+    job_id: UUID,
+    request: Request,
+    session: Session = Depends(get_db),
+    client: redis.Redis = Depends(get_redis),
+) -> JobOut:
+    job = repo.get_job(session, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if not repo.reset_failed_to_pending(session, job_id):
+        raise HTTPException(
+            status_code=409, detail="job is not in a terminal failed state"
+        )
+    settings = request.app.state.settings
+    enqueue(client, settings.stream_for_priority(job.priority), str(job_id))
+    repo.mark_synced(session, job_id)
+    session.refresh(job)
     return JobOut.model_validate(job)
 
 

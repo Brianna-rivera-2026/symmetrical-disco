@@ -45,6 +45,8 @@ class JobOut(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     scheduled_at: datetime | None
+    attempts: int
+    max_attempts: int
 
 
 class JobList(BaseModel):

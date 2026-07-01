@@ -136,3 +136,44 @@ def test_list_filters_by_priority(client):
     items = resp.json()["items"]
     assert len(items) == 1
     assert items[0]["priority"] == "high"
+
+
+def test_job_out_exposes_attempts(client):
+    resp = client.post(
+        "/jobs", json={"type": "email", "payload": {"to": "a@b.com", "subject": "Hi"}}
+    )
+    job_id = resp.json()["id"]
+    got = client.get(f"/jobs/{job_id}").json()
+    assert got["attempts"] == 0
+    assert got["max_attempts"] == 4
+
+
+def test_retry_failed_job_reenqueues(client, db_session):
+    from app import repository as repo
+    from app.schemas.enums import JobType
+
+    job = repo.create_job(db_session, JobType.webhook, {"url": "https://x.test"})
+    repo.claim_job(db_session, job.id)
+    repo.fail_job(db_session, job.id, {"type": "E", "message": "boom"})
+
+    resp = client.post(f"/jobs/{job.id}/retry")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "pending"
+    assert body["attempts"] == 0
+
+
+def test_retry_non_failed_returns_409(client):
+    resp = client.post(
+        "/jobs", json={"type": "email", "payload": {"to": "a@b.com", "subject": "Hi"}}
+    )
+    job_id = resp.json()["id"]
+    retry = client.post(f"/jobs/{job_id}/retry")
+    assert retry.status_code == 409
+
+
+def test_retry_unknown_returns_404(client):
+    import uuid
+
+    resp = client.post(f"/jobs/{uuid.uuid4()}/retry")
+    assert resp.status_code == 404
