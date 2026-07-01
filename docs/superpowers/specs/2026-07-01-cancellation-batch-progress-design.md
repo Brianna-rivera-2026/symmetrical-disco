@@ -67,18 +67,21 @@ that this spec covers together:
 2. **Postgres is the single source of truth for the cancel signal and
    progress** — no Redis signal key. The worker injects a `JobContext` that the
    handler uses to read the cancel flag and report progress.
-3. **Throttled polling.** The context polls Postgres **at most once per
-   `cancel_poll_interval_s`** and caches the flag in worker memory between polls,
-   coalescing the cancel-read and the progress-write into **one** guarded
-   round-trip. This bounds DB load to `~duration / interval` reads per batch
-   regardless of item count (no per-item N+1).
+3. **Throttled, change-only polling.** The context polls Postgres **at most once
+   per `cancel_poll_interval_s`** and caches the flag in worker memory between
+   polls. On a poll it writes progress only when the percent changed (a coalesced
+   `UPDATE … RETURNING cancel_requested_at`), else it reads flag-only. This bounds
+   DB load to `~duration / interval` round-trips per batch regardless of item
+   count (no per-item N+1) and avoids MVCC write amplification.
 4. **Batch item failures are collected, never raised.** A failing item is
    recorded in the summary and the loop continues; the job ends `completed`. A
    batch therefore only ever retries on genuine *infra* failure (timeout / dead
    worker), routed through the existing `schedule_retry_or_fail`.
 5. **Idempotency = replay.** Optional client key, **partial unique index**. A
-   repeat with the same key returns the existing job (`200`); same key + a
-   different payload → `409`; the DB unique constraint is the race arbiter.
+   repeat with the same key + payload returns the existing job (`200`); same key
+   + a different payload → `409`, decided by comparing a stored **canonical hash
+   of the submitted payload** (never the DB-normalized JSONB). The unique
+   constraint is the race arbiter, and the race path applies the same hash check.
 6. **Doomed batches are rejected at the gateway (`422`)**, not left to time out
    in a worker. A `BatchPayload` validator rejects a submission whose estimated
    duration would exceed the handler-timeout budget.
@@ -89,9 +92,10 @@ Add to `jobs`:
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `progress` | `INTEGER NULL` | 0–100; `NULL` for non-batch jobs, set to `0` when a batch begins |
+| `progress` | `INTEGER NULL` | 0–100; `NULL` for non-batch jobs, set to `0` synchronously when the worker starts a batch (§7) |
 | `cancel_requested_at` | `TIMESTAMPTZ NULL` | cooperative-cancel flag **and** audit timestamp; `NULL` = not requested |
 | `idempotency_key` | `TEXT NULL` | client-supplied dedupe key |
+| `idempotency_hash` | `TEXT NULL` | SHA-256 of the canonical submitted payload; set alongside `idempotency_key`; detects key reuse with a different payload (§9) |
 
 Plus a new enum value: `ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'batch'`.
 
@@ -99,9 +103,9 @@ Index:
 - `CREATE UNIQUE INDEX uq_jobs_idempotency_key ON jobs (idempotency_key) WHERE idempotency_key IS NOT NULL;`
   (partial — many rows may have `NULL`; only real keys are constrained unique).
 
-- `upgrade`: add three columns (all nullable, no backfill needed), add the enum
+- `upgrade`: add four columns (all nullable, no backfill needed), add the enum
   value, create the partial unique index.
-- `downgrade`: drop the index and the three columns. **Leave the enum value** —
+- `downgrade`: drop the index and the four columns. **Leave the enum value** —
   Postgres cannot drop an enum value cleanly; it is inert if unused.
 
 > ⚠️ `ALTER TYPE … ADD VALUE` cannot run inside a transaction block on older
@@ -110,16 +114,16 @@ Index:
 > `IF NOT EXISTS`) before the index/column DDL. Verify against the project's PG
 > version during implementation.
 
-`Job` model (`app/models/job.py`) gains the three mapped columns
+`Job` model (`app/models/job.py`) gains the four mapped columns
 (`progress: int | None`, `cancel_requested_at: datetime | None`,
-`idempotency_key: str | None`). `JobType` (`app/schemas/enums.py`) gains
-`batch = "batch"`.
+`idempotency_key: str | None`, `idempotency_hash: str | None`). `JobType`
+(`app/schemas/enums.py`) gains `batch = "batch"`.
 
 ## 5. Config additions (`app/core/config.py`)
 
 | Setting | Default | Meaning |
 |---------|---------|---------|
-| `cancel_poll_interval_s` | `2.0` | min wall-clock between a batch's DB polls (cancel-read + progress-flush) |
+| `cancel_poll_interval_s` | `2.0` | min wall-clock between a batch's DB polls (cancel-read + change-only progress-write) |
 | `batch_timeout_safety_factor` | `0.8` | fraction of `job_handler_timeout_s` a batch's estimated duration must stay under |
 
 A separate **static module constant** `MAX_BATCH_ITEMS = 500` lives in
@@ -234,19 +238,32 @@ Real implementation `PgJobContext(job_id, session_factory, poll_interval_s)`:
 - `set_progress(pct)` stores `self._pending_pct = pct` in memory only — **no DB
   I/O**.
 - `cancelled()` is the throttle point. If `monotonic() - self._last_poll >=
-  poll_interval_s` (or it's the first call), it runs **one** guarded, coalesced
-  round-trip and refreshes the cache:
+  poll_interval_s` (or it's the first call), it performs **one** round-trip and
+  refreshes the cache. To avoid MVCC write amplification — every `UPDATE` writes
+  a new tuple and marks the old one dead for autovacuum — it writes progress
+  **only when the percentage actually changed** since the last persisted value;
+  otherwise it reads the flag without writing:
 
-  ```sql
-  UPDATE jobs SET progress = :pending_pct
-   WHERE id = :id AND status = 'processing'
-   RETURNING cancel_requested_at;
-  ```
+  - `pending_pct != last_written_pct` → guarded, coalesced **write** (flushes
+    progress, reads the cancel flag, confirms still-`processing`, all in one
+    statement), then set `last_written_pct = pending_pct`:
 
-  This simultaneously (a) flushes the stashed progress, (b) reads the cancel
-  flag, and (c) confirms the row is still `processing` (guarded — a late write
-  can't resurrect a finalized row; `rowcount == 0` ⇒ treat as cancelled/gone and
-  stop). Between ticks, `cancelled()` returns the cached boolean with no I/O.
+    ```sql
+    UPDATE jobs SET progress = :pending_pct
+     WHERE id = :id AND status = 'processing'
+     RETURNING cancel_requested_at;
+    ```
+
+  - `pending_pct == last_written_pct` → **read-only** poll (no dead tuple):
+
+    ```sql
+    SELECT cancel_requested_at, status FROM jobs WHERE id = :id;
+    ```
+
+  Either way, `rowcount == 0` (write) or a non-`processing` status (read) ⇒ treat
+  as cancelled/gone and stop; the guard means a late write can't resurrect a
+  finalized row. Between ticks, `cancelled()` returns the cached boolean with no
+  I/O.
 
 The handler shape (unchanged from what was approved) — `cancelled()` is called
 before the per-item work, so it flushes the *previous* iteration's stashed
@@ -269,17 +286,23 @@ def handle_batch(payload: BatchPayload, ctx: JobContext) -> dict:
     return summary                               # job -> completed (even if all failed)
 ```
 
-- A final forced progress flush to `100` happens on normal completion — the
-  worker's `complete_job` sets `progress = 100` for any row whose
-  `progress IS NOT NULL` (i.e. a batch that began tracking), leaving non-batch
-  jobs `NULL`. So a completed batch always reads `100` even if the last poll
-  didn't tick.
+- **Progress initialization & completion are type-driven, not poll-driven.** The
+  worker sets `progress = 0` **synchronously when it starts a batch** (right after
+  claim, before the handler's first item — *not* inside the poll loop), so a batch
+  is numeric for its whole processing lifetime. On normal completion,
+  `complete_job` sets `progress = 100` for **`batch`-type** jobs specifically (the
+  worker passes the target since it knows `job.type`), leaving non-batch jobs
+  `NULL`. Because both are keyed off the job *type* — never `progress IS NOT NULL`
+  — a tiny batch that finishes in under one `poll_interval_s` (so the poll loop
+  never fired) still initializes to `0` and lands on `100`, never a stuck `NULL`.
 - **Testability:** unit tests pass a fake `JobContext` (e.g. `cancelled()`
   returns `True` on the k-th call, `set_progress` records calls). Handlers never
   import a session.
-- **Load:** a ~40 s batch with `poll_interval_s=2.0` performs ~20 DB round-trips
-  regardless of item count; 10 concurrent such workers do ~200 hits/interval
-  rather than thousands at once.
+- **Load:** §5 caps a batch's estimated duration at `0.8 × job_handler_timeout_s`
+  (~36 s by default), so a batch does **≤ ~18 polls** regardless of item count
+  (the 900-writes-per-30-min case can't occur here), and — with change-only
+  writes — far fewer than that many `UPDATE`s. 10 concurrent batch workers do
+  ~10 round-trips/interval, not thousands at once.
 
 Handler dispatch: all handlers adopt a uniform `(payload, ctx)` signature; the
 three existing pure handlers accept and ignore `ctx`. `run_handler`
@@ -309,6 +332,9 @@ shape: `{total, succeeded, failed, errors: [{index, error}]}`.
 
 ```python
 job = repo.get_job(session, job_id)
+is_batch = job.type == JobType.batch
+if is_batch:
+    repo.init_progress(session, job.id)          # guarded progress=0, synchronous
 ctx = PgJobContext(job.id, session_factory, settings.cancel_poll_interval_s)
 try:
     payload = validate_payload(job.type, job.payload)
@@ -324,9 +350,13 @@ except HandlerTimeout:
     ...   # unchanged
 except Exception as exc:                                       # unchanged
     ...
-won = repo.complete_job(session, job.id, result)               # sets progress=100 for batch
+won = repo.complete_job(session, job.id, result, progress=100 if is_batch else None)
 ...
 ```
+
+`complete_job` gains an optional `progress: int | None = None` and applies it via
+`progress = COALESCE(:progress, progress)` — `100` for a batch, untouched (`NULL`)
+for everything else.
 
 - `cancel_job` is a **guarded terminal** transition mirroring `complete_job`:
   `UPDATE … SET status='cancelled', result=:summary, completed_at=now()
@@ -350,33 +380,60 @@ per-item idempotent across attempts, and this only happens on infra failure.
 ```
 submit(submission):
   key = submission.idempotency_key
-  if key is not None:
+  if key is None:
+    job = repo.create_job(...)                          # today's behavior -> 202
+  else:
+    req_hash = canonical_hash(submission.type, submission.payload)
     existing = repo.get_by_idempotency_key(key)
     if existing is not None:
-        if (existing.type, existing.payload) == (submission.type, submission.payload):
-            return 200  JobAccepted(existing)          # replay
-        return 409  ("idempotency key reused with a different payload")
-    # create with key; the partial unique index is the race arbiter:
+        return replay_or_conflict(existing, req_hash)   # no create
+    # create with key + hash; the partial unique index is the race arbiter:
     try:
-        job = repo.create_job(..., idempotency_key=key)
+        job = repo.create_job(..., idempotency_key=key, idempotency_hash=req_hash)
     except IntegrityError:                              # concurrent same-key insert lost
         session.rollback()
         existing = repo.get_by_idempotency_key(key)     # the winner's row
-        return 200  JobAccepted(existing)
-  else:
-    job = repo.create_job(...)                          # today's behavior, always create
+        return replay_or_conflict(existing, req_hash)   # SAME check — not an unconditional 200
   # …existing handoff (enqueue/schedule + mark_synced)… -> 202 JobAccepted(job)
+
+replay_or_conflict(existing, req_hash):
+    if existing.idempotency_hash == req_hash:
+        return 200  JobAccepted(existing)               # true replay
+    return 409  ("idempotency key reused with a different payload")
 ```
 
-- **New job → `202`** (unchanged status for creation); **replay → `200`**.
-- The enqueue/schedule handoff and `mark_synced` run **only** on the create
-  path, never on a replay (the original submission already did the handoff).
-- `create_job` (`app/repository.py`) gains an `idempotency_key: str | None = None`
-  parameter written onto the row.
+- **New job → `202`**; **replay → `200`**. Both the first-lookup path **and** the
+  `IntegrityError` race path funnel through `replay_or_conflict`, so a loser that
+  submitted a *different* payload under the winner's key gets `409` — never the
+  winner's job (closes the cross-client leak).
+- The enqueue/schedule handoff and `mark_synced` run **only** on the create path,
+  never on a replay (the original submission already did the handoff).
+- `create_job` (`app/repository.py`) gains `idempotency_key: str | None = None`
+  and `idempotency_hash: str | None = None`, written onto the row together.
 - Keys never expire; a cancelled/failed job's key stays claimed. Resubmitting the
-  same key returns that terminal job (documented; use `/retry` to re-run, or a
-  fresh key to submit anew). This is the standard "idempotent create" contract,
-  not a scheduling-dedupe window.
+  same key + payload returns that terminal job (documented; use `/retry` to re-run,
+  or a fresh key to submit anew). Standard "idempotent create," not a
+  scheduling-dedupe window.
+
+**Comparing payloads robustly (why not raw `==`).** `submission.payload` is a raw
+JSON-parsed `dict` (so it holds no `UUID`/`datetime` objects), but
+`existing.payload` has round-tripped through Postgres **JSONB**, which normalizes
+representation (numeric formatting like `1` vs `1.0`, key ordering, whitespace).
+Comparing the two with `==` can spuriously differ and raise a false `409`. So we
+never compare against the stored JSONB. Instead, at create time we store
+`idempotency_hash` = a canonical hash of the **submitted** payload, and on replay
+recompute it from the *incoming* submission:
+
+```python
+def canonical_hash(job_type, payload) -> str:
+    blob = json.dumps({"type": job_type.value, "payload": payload},
+                      sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(blob).hexdigest()
+```
+
+Both sides derive from submitted (pre-JSONB) payloads via identical
+canonicalization, so the comparison is stable regardless of how Postgres stores
+the value.
 
 ## 10. API & schema surface
 
@@ -404,13 +461,17 @@ submit(submission):
 | Job flaps `processing → pending` (immediate retry) mid-cancel | Bounded loop re-attempts step A; not mis-reported as terminal. |
 | Batch with some failing items | Loop collects errors, `succeeded/failed` counts; job `completed`, `progress=100`. |
 | Batch where **every** item fails | Still `completed` with a summary (`succeeded=0`); not `failed`. |
+| **Tiny batch finishes before first poll** | `progress` is set to `0` at start and `100` at completion (both type-driven), never a stuck `NULL`. |
+| Progress unchanged between two polls | Read-only `SELECT` poll — no `UPDATE`, no dead tuple (MVCC bloat guard). |
 | Batch estimated duration ≥ budget | Rejected at submission with `422` before DB/Redis touched. |
 | Batch worker dies mid-run | Reaper `schedule_retry_or_fail` → `processing → pending` → **re-runs whole batch**, `progress` resets to 0. |
 | Batch self-times-out | Exceptional (gateway rejects doomed batches); `HandlerTimeout` → retry + recycle, same as any handler. |
 | Progress write after finalize (late poll) | Guarded `WHERE status='processing'` → `rowcount==0`, no-op; context treats as gone and stops. |
-| Duplicate idempotency key, same payload | `200`, existing job; no new row, no re-enqueue. |
-| Duplicate idempotency key, different payload | `409`. |
-| Concurrent same-key submits | Unique index → one INSERT wins; loser catches `IntegrityError`, re-looks-up, returns `200` existing. |
+| Duplicate idempotency key, same payload | `200`, existing job; no new row, no re-enqueue (hash matches). |
+| Duplicate idempotency key, different payload | `409` (stored hash ≠ recomputed hash), on both the lookup path and the race path. |
+| Concurrent same-key submits, same payload | Unique index → one INSERT wins; loser catches `IntegrityError`, re-looks-up, hash matches → `200` existing. |
+| Concurrent same-key submits, different payloads | Loser's `IntegrityError` re-lookup finds a hash mismatch → `409` (does **not** receive the winner's job). |
+| Equivalent-but-reformatted payload (e.g. JSONB renders `1.0` as `1`) | Canonical hash of the submitted payload matches → `200`, no false `409`. |
 | Submit without a key | Unchanged — always creates, `202`. |
 
 ## 12. Testing plan (`uv run pytest`)
@@ -423,9 +484,12 @@ submit(submission):
 - Throttle: fake clock — `cancelled()` hits the DB only once per
   `poll_interval_s`; `set_progress` between ticks does no I/O; the flushed value
   is the latest stashed percent.
+- Change-only writes: when `pending_pct == last_written_pct` the poll issues a
+  read (no `UPDATE`); it upgrades to a write only when the percent advances.
 - `BatchPayload` budget validator: rejects `items × item_delay_ms ≥ budget ×
   factor` (`422`), accepts under budget; skipped when no context supplied.
-- Idempotency helper: same-payload match vs different-payload mismatch decision.
+- `canonical_hash`: identical payloads (incl. reordered keys / reformatted
+  numbers) hash equal; a genuinely different payload hashes differently.
 
 **Integration (real Redis + Postgres)**
 - Cancel `pending` → `cancelled`, stream msg later absorbed by claim guard (job
@@ -440,15 +504,20 @@ submit(submission):
   → `rowcount==0`, worker skips `XACK`.
 - Progress advances: submit a batch, poll `GET /jobs/{id}` and observe `progress`
   climbing, `100` at completion.
-- Idempotency: same key twice → second returns `200` with the first job's id, no
-  second row / no second enqueue; same key + different payload → `409`;
-  concurrent same-key submits → exactly one row, both callers observe it.
+- Tiny batch (1 item, sub-`poll_interval_s`) completes → `progress == 100`, never
+  `NULL`.
+- Idempotency: same key + same payload → second returns `200` with the first
+  job's id, no second row / no second enqueue; same key + different payload →
+  `409`.
+- Concurrent same-key race: two simultaneous submits with **different** payloads
+  → exactly one row created; the loser gets `409` (hash mismatch), **not** the
+  winner's job.
 
 **Existing-test migration**
 - Handler-calling tests updated for the `(payload, ctx)` signature (pure handlers
   ignore `ctx`).
 - Fixtures creating jobs pick up the new nullable columns (`progress=NULL`,
-  `cancel_requested_at=NULL`, `idempotency_key=NULL`).
+  `cancel_requested_at=NULL`, `idempotency_key=NULL`, `idempotency_hash=NULL`).
 - `JobOut` assertions updated for the two new fields.
 
 ## 13. Docker Compose
