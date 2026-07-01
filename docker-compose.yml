@@ -80,6 +80,7 @@ services:
     build: .
     image: jobprocessor-app:${APP_TAG:-dev}
     command: python -m app.ticker
+    restart: on-failure
     stop_grace_period: 15s
     environment:
       DATABASE_URL: postgresql+psycopg://jobs:jobs@postgres:5432/jobs
