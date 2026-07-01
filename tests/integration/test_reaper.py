@@ -77,3 +77,28 @@ def test_reaper_only_acks_completed_ghost(db_session, redis_client, test_setting
         == 0
     )
     assert redis_client.xlen(settings.stream_normal) == 1  # no re-enqueue
+
+
+def test_reaper_treats_cancelled_unsynced_as_ghost_no_resurrection(
+    db_session, redis_client, test_settings
+):
+    settings = test_settings.model_copy(update={"visibility_timeout_s": 0})
+    # pending + is_synced_to_redis=False (create_job leaves it False) — the
+    # exact row state the gap targets: cancelled while pending, in the narrow
+    # window before the Redis handoff completed.
+    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    _plant_pel(redis_client, settings.consumer_group, settings.stream_normal, job.id)
+    assert repo.cancel_pending_or_scheduled(db_session, job.id) is True
+
+    handled = reap_stale(db_session, redis_client, settings)
+
+    assert handled == 1
+    db_session.refresh(job)
+    assert job.status is JobStatus.cancelled
+    assert (
+        redis_client.xpending(settings.stream_normal, settings.consumer_group)[
+            "pending"
+        ]
+        == 0
+    )
+    assert redis_client.xlen(settings.stream_normal) == 1  # no resurrection XADD

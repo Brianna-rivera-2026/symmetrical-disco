@@ -81,8 +81,8 @@ def reconcile_orphans(session: Session, client: redis.Redis, settings: Settings)
 def _reap_one(session, client, settings, stream, message_id, job_id) -> None:
     job = repo.get_job(session, job_id)
     if job is not None:
-        if job.status in (JobStatus.completed, JobStatus.failed):
-            pass  # ghost: worker finished, XACK was dropped
+        if job.status in (JobStatus.completed, JobStatus.failed, JobStatus.cancelled):
+            pass  # ghost: terminal status, no Redis handoff needed
         elif job.status is JobStatus.processing:
             schedule_retry_or_fail(
                 session,
