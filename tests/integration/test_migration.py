@@ -57,3 +57,9 @@ def test_null_idempotency_keys_do_not_collide(db_session):
     db_session.add(Job(type=JobType.email, payload={"to": "a", "subject": "b"}))
     db_session.add(Job(type=JobType.email, payload={"to": "a", "subject": "b"}))
     db_session.commit()  # two NULL keys must not violate the partial index
+
+
+def test_status_created_at_index_exists(pg_engine):
+    insp = inspect(pg_engine)
+    index_names = {ix["name"] for ix in insp.get_indexes("jobs")}
+    assert "ix_jobs_status_created_at" in index_names

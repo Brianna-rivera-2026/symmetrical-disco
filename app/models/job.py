@@ -68,6 +68,7 @@ class Job(Base):
             unique=True,
             postgresql_where=sa.text("idempotency_key IS NOT NULL"),
         ),
+        Index("ix_jobs_status_created_at", "status", "created_at"),
     )
 
     def __init__(self, **kwargs: object) -> None:
