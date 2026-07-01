@@ -55,3 +55,13 @@ class JobOut(BaseModel):
 class JobList(BaseModel):
     items: list[JobOut]
     next_cursor: str | None
+
+
+class HealthChecks(BaseModel):
+    postgres: str
+    redis: str
+
+
+class HealthResponse(BaseModel):
+    status: str
+    checks: HealthChecks

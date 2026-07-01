@@ -1,5 +1,23 @@
-def test_health(client):
-    assert client.get("/health").json() == {"status": "ok"}
+def test_health_ok_when_backends_up(client):
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "status": "ok",
+        "checks": {"postgres": "ok", "redis": "ok"},
+    }
+
+
+def test_health_503_when_redis_down(client):
+    from app.core.redis import create_redis_client
+
+    # Point the app at a closed port -> PING raises a RedisError.
+    client.app.state.redis = create_redis_client("redis://127.0.0.1:6390/0")
+    resp = client.get("/health")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "unavailable"
+    assert body["checks"]["redis"] == "error"
+    assert body["checks"]["postgres"] == "ok"
 
 
 def test_submit_creates_job_and_enqueues(client):

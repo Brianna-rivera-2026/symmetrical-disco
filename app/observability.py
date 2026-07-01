@@ -1,5 +1,10 @@
 from datetime import datetime
 
+import redis
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
 from app.schemas.enums import JobStatus
 
 
@@ -34,3 +39,19 @@ def pending_age_seconds(min_created_at: datetime | None, now: datetime) -> float
     if min_created_at is None:
         return None
     return (now - min_created_at).total_seconds()
+
+
+def check_readiness(session: Session, client: redis.Redis) -> dict[str, str]:
+    """Ping both backends independently; one failure never masks the other."""
+    checks: dict[str, str] = {}
+    try:
+        session.execute(text("SELECT 1"))
+        checks["postgres"] = "ok"
+    except SQLAlchemyError:
+        checks["postgres"] = "error"
+    try:
+        client.ping()
+        checks["redis"] = "ok"
+    except redis.RedisError:
+        checks["redis"] = "error"
+    return checks

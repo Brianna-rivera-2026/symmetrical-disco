@@ -3,6 +3,7 @@ from uuid import UUID
 
 import redis
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -10,18 +11,36 @@ from sqlalchemy.orm import Session
 from app import repository as repo
 from app.api.deps import get_db, get_redis
 from app.idempotency import canonical_hash
+from app.observability import check_readiness
 from app.queue.delayed import schedule
 from app.queue.producer import enqueue
-from app.schemas.api import JobAccepted, JobList, JobOut, JobSubmission
+from app.schemas.api import (
+    HealthChecks,
+    HealthResponse,
+    JobAccepted,
+    JobList,
+    JobOut,
+    JobSubmission,
+)
 from app.schemas.enums import JobPriority, JobStatus, JobType
 from app.schemas.payloads import validate_payload
 
 router = APIRouter()
 
 
-@router.get("/health")
-def health() -> dict:
-    return {"status": "ok"}
+@router.get("/health", response_model=HealthResponse)
+def health(
+    session: Session = Depends(get_db),
+    client: redis.Redis = Depends(get_redis),
+):
+    checks = check_readiness(session, client)
+    ok = all(value == "ok" for value in checks.values())
+    if not ok:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "checks": checks},
+        )
+    return HealthResponse(status="ok", checks=HealthChecks(**checks))
 
 
 def _create_and_handoff(session, client, settings, submission, key, req_hash):
