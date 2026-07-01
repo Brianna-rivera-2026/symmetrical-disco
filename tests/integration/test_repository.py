@@ -233,3 +233,71 @@ def test_create_job_sets_max_attempts(db_session):
     )
     db_session.refresh(job)
     assert job.max_attempts == 2
+
+
+def test_complete_job_guarded_increments_attempts(db_session):
+    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    repo.claim_job(db_session, job.id)
+    assert repo.complete_job(db_session, job.id, {"message_id": "m1"}) is True
+    db_session.refresh(job)
+    assert job.status is JobStatus.completed
+    assert job.attempts == 1
+
+
+def test_complete_job_loses_when_not_processing(db_session):
+    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    repo.claim_job(db_session, job.id)
+    repo.retry_to_pending(db_session, job.id)  # someone re-queued it → now pending
+    assert repo.complete_job(db_session, job.id, {"message_id": "m1"}) is False
+    db_session.refresh(job)
+    assert job.status is JobStatus.pending
+
+
+def test_fail_job_guarded_increments_attempts(db_session):
+    job = repo.create_job(db_session, JobType.webhook, {"url": "https://x.test"})
+    repo.claim_job(db_session, job.id)
+    assert repo.fail_job(db_session, job.id, {"type": "E", "message": "boom"}) is True
+    db_session.refresh(job)
+    assert job.status is JobStatus.failed
+    assert job.attempts == 1
+
+
+def test_retry_to_pending_resets_sync_and_counts(db_session):
+    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    repo.mark_synced(db_session, job.id)
+    repo.claim_job(db_session, job.id)
+    assert repo.retry_to_pending(db_session, job.id) is True
+    db_session.refresh(job)
+    assert job.status is JobStatus.pending
+    assert job.attempts == 1
+    assert job.is_synced_to_redis is False
+    assert job.started_at is None
+
+
+def test_retry_to_scheduled_sets_when(db_session):
+    from datetime import datetime, timezone
+
+    when = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    repo.claim_job(db_session, job.id)
+    assert repo.retry_to_scheduled(db_session, job.id, when) is True
+    db_session.refresh(job)
+    assert job.status is JobStatus.scheduled
+    assert job.scheduled_at == when
+    assert job.attempts == 1
+    assert job.is_synced_to_redis is False
+
+
+def test_reset_failed_to_pending_only_from_failed(db_session):
+    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    repo.claim_job(db_session, job.id)
+    repo.fail_job(db_session, job.id, {"type": "E", "message": "x"})
+    assert repo.reset_failed_to_pending(db_session, job.id) is True
+    db_session.refresh(job)
+    assert job.status is JobStatus.pending
+    assert job.attempts == 0
+    assert job.error is None
+    assert job.completed_at is None
+    assert job.is_synced_to_redis is False
+    # A second reset finds it already pending → guard fails.
+    assert repo.reset_failed_to_pending(db_session, job.id) is False

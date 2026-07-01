@@ -90,22 +90,82 @@ def claim_job(session: Session, job_id: UUID) -> bool:
     return result.rowcount == 1
 
 
-def complete_job(session: Session, job_id: UUID, result: dict) -> None:
-    session.execute(
+def complete_job(session: Session, job_id: UUID, result: dict) -> bool:
+    res = session.execute(
         update(Job)
-        .where(Job.id == job_id)
-        .values(status=JobStatus.completed, result=result, completed_at=_now())
+        .where(Job.id == job_id, Job.status == JobStatus.processing)
+        .values(
+            status=JobStatus.completed,
+            result=result,
+            completed_at=_now(),
+            attempts=Job.attempts + 1,
+        )
     )
     session.commit()
+    return res.rowcount == 1
 
 
-def fail_job(session: Session, job_id: UUID, error: dict) -> None:
-    session.execute(
+def fail_job(session: Session, job_id: UUID, error: dict) -> bool:
+    res = session.execute(
         update(Job)
-        .where(Job.id == job_id)
-        .values(status=JobStatus.failed, error=error, completed_at=_now())
+        .where(Job.id == job_id, Job.status == JobStatus.processing)
+        .values(
+            status=JobStatus.failed,
+            error=error,
+            completed_at=_now(),
+            attempts=Job.attempts + 1,
+        )
     )
     session.commit()
+    return res.rowcount == 1
+
+
+def retry_to_pending(session: Session, job_id: UUID) -> bool:
+    res = session.execute(
+        update(Job)
+        .where(Job.id == job_id, Job.status == JobStatus.processing)
+        .values(
+            status=JobStatus.pending,
+            attempts=Job.attempts + 1,
+            is_synced_to_redis=False,
+            started_at=None,
+        )
+    )
+    session.commit()
+    return res.rowcount == 1
+
+
+def retry_to_scheduled(session: Session, job_id: UUID, scheduled_at: datetime) -> bool:
+    res = session.execute(
+        update(Job)
+        .where(Job.id == job_id, Job.status == JobStatus.processing)
+        .values(
+            status=JobStatus.scheduled,
+            scheduled_at=scheduled_at,
+            attempts=Job.attempts + 1,
+            is_synced_to_redis=False,
+            started_at=None,
+        )
+    )
+    session.commit()
+    return res.rowcount == 1
+
+
+def reset_failed_to_pending(session: Session, job_id: UUID) -> bool:
+    res = session.execute(
+        update(Job)
+        .where(Job.id == job_id, Job.status == JobStatus.failed)
+        .values(
+            status=JobStatus.pending,
+            attempts=0,
+            error=None,
+            started_at=None,
+            completed_at=None,
+            is_synced_to_redis=False,
+        )
+    )
+    session.commit()
+    return res.rowcount == 1
 
 
 def promote_scheduled_to_pending(session: Session, job_ids: list[UUID]) -> int:
