@@ -1,7 +1,7 @@
+import logging
 from datetime import datetime, timedelta, timezone
 
 import redis
-import structlog
 from sqlalchemy.orm import Session
 
 from app import repository as repo
@@ -10,7 +10,7 @@ from app.models.job import Job
 from app.queue import delayed
 from app.queue.producer import enqueue
 
-log = structlog.get_logger("retry")
+log = logging.getLogger("app.retry")
 
 
 def backoff_delay(attempts: int, schedule: list[int]) -> int:
@@ -31,7 +31,10 @@ def schedule_retry_or_fail(
     n = job.attempts + 1  # the attempt that just ended
     if n >= job.max_attempts:
         won = repo.fail_job(session, job.id, error)
-        log.info("retry.failed_permanent", job_id=str(job.id), attempts=n, won=won)
+        log.info(
+            "retry.failed_permanent",
+            extra={"job_id": str(job.id), "attempts": n, "won": won},
+        )
         return won
 
     delay = backoff_delay(n, settings.retry_backoff_schedule)
@@ -40,7 +43,9 @@ def schedule_retry_or_fail(
         if won:
             enqueue(client, settings.stream_for_priority(job.priority), str(job.id))
             repo.mark_synced(session, job.id)
-        log.info("retry.immediate", job_id=str(job.id), attempts=n, won=won)
+        log.info(
+            "retry.immediate", extra={"job_id": str(job.id), "attempts": n, "won": won}
+        )
         return won
 
     scheduled_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
@@ -50,5 +55,8 @@ def schedule_retry_or_fail(
             client, settings.delayed_zset, str(job.id), scheduled_at.timestamp()
         )
         repo.mark_synced(session, job.id)
-    log.info("retry.delayed", job_id=str(job.id), attempts=n, delay=delay, won=won)
+    log.info(
+        "retry.delayed",
+        extra={"job_id": str(job.id), "attempts": n, "delay": delay, "won": won},
+    )
     return won

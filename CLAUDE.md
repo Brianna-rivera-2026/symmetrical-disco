@@ -16,7 +16,7 @@ This project is distributed background job processing system that uses **uv** fo
 ## Strict Guidelines
 1. Never suggest `python -m venv` or `pip install`.
 2. Always run tests via `uv run pytest` before declaring a task complete.
-3. Don't use print statements, only structured logging with job context
+3. Don't use print statements; use stdlib logging via logging.getLogger("app.<component>") with job context bound through app.core.logging.bind_log_context.
 
 ## Tech stack
 * FastAPI for the API
@@ -25,7 +25,7 @@ This project is distributed background job processing system that uses **uv** fo
 * SQLAlchemy 2.0 + Alembic
 * Pytest for testing
 * Docker Compose for orchestration
-* structlog for structured logging
+* stdlib logging (JSON to stdout) + OpenTelemetry for logs/metrics/traces
 
 ## Architecture
 1. API Service - Accepts job submissions and status queries

@@ -1,15 +1,16 @@
+import logging
 import signal
 from collections.abc import Callable
 from dataclasses import dataclass
 from uuid import UUID
 
 import redis
-import structlog
 from sqlalchemy.orm import Session
 
 from app import repository as repo
 from app.core.config import Settings
 from app.core.db import make_engine, make_session_factory
+from app.core.logging import bind_log_context, bind_static_log_context
 from app.core.redis import create_redis_client
 from app.jobs.handlers import JobCancelled
 from app.jobs.registry import run_handler
@@ -20,7 +21,7 @@ from app.schemas.payloads import validate_payload
 from app.worker.context import PgJobContext
 from app.worker.timeout import HandlerTimeout, run_with_timeout
 
-log = structlog.get_logger("worker")
+log = logging.getLogger("app.worker")
 
 
 @dataclass
@@ -38,7 +39,7 @@ def process_job(
     session_factory: Callable[[], Session] | None = None,
 ) -> Outcome:
     if not repo.claim_job(session, job_id):
-        log.info("job.skipped", reason="not_claimable")
+        log.info("job.skipped", extra={"reason": "not_claimable"})
         return Outcome(ack=True, recycle=False, label="skipped")
 
     job = repo.get_job(session, job_id)
@@ -53,7 +54,7 @@ def process_job(
         )
     except JobCancelled as cancelled:
         won = repo.cancel_job(session, job.id, cancelled.summary)
-        log.info("job.cancelled", won=won)
+        log.info("job.cancelled", extra={"won": won})
         return Outcome(ack=won, recycle=False, label="cancelled")
     except HandlerTimeout:
         won = schedule_retry_or_fail(
@@ -66,7 +67,7 @@ def process_job(
                 "message": f">{settings.job_handler_timeout_s}s",
             },
         )
-        log.warning("job.timeout", won=won)
+        log.warning("job.timeout", extra={"won": won})
         return Outcome(ack=won, recycle=True, label="timeout")
     except Exception as exc:  # noqa: BLE001 — any handler/validation error is retryable
         won = schedule_retry_or_fail(
@@ -76,7 +77,9 @@ def process_job(
             job,
             {"type": type(exc).__name__, "message": str(exc)},
         )
-        log.info("job.retry_scheduled", error_type=type(exc).__name__, won=won)
+        log.info(
+            "job.retry_scheduled", extra={"error_type": type(exc).__name__, "won": won}
+        )
         return Outcome(ack=won, recycle=False, label="retried")
 
     won = repo.complete_job(session, job.id, result, progress=100 if is_batch else None)
@@ -102,11 +105,10 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
     signal.signal(signal.SIGTERM, _request_stop)
     signal.signal(signal.SIGINT, _request_stop)
 
-    structlog.contextvars.bind_contextvars(consumer=CONSUMER_NAME)
+    bind_static_log_context(consumer=CONSUMER_NAME)
     log.info(
         "worker.started",
-        streams=settings.ordered_streams,
-        group=settings.consumer_group,
+        extra={"streams": settings.ordered_streams, "group": settings.consumer_group},
     )
 
     def _should_stop() -> bool:
@@ -124,7 +126,7 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
         )
         for stream, message_id, fields in batch:
             job_id = UUID(fields["job_id"])
-            with structlog.contextvars.bound_contextvars(
+            with bind_log_context(
                 job_id=str(job_id), message_id=message_id, stream=stream
             ):
                 log.info("job.received")
@@ -137,13 +139,13 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
                 if outcome.recycle:
                     timeouts += 1
                     if timeouts >= settings.max_handler_timeouts_before_recycle:
-                        log.warning("worker.recycling", timeouts=timeouts)
+                        log.warning("worker.recycling", extra={"timeouts": timeouts})
                         exit_code = 1
                         break
         if exit_code:
             break
 
-    log.info("worker.stopped", exit_code=exit_code)
+    log.info("worker.stopped", extra={"exit_code": exit_code})
     client.close()
     engine.dispose()
     return exit_code

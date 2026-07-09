@@ -10,9 +10,11 @@ _log_context: ContextVar[dict] = ContextVar("log_context", default={})
 
 # Attribute names present on every LogRecord; anything else came in via
 # `extra` (or the ContextFilter) and belongs in the JSON output.
-_RESERVED = frozenset(
-    logging.LogRecord("", 0, "", 0, "", (), None).__dict__
-) | {"message", "asctime", "taskName"}
+_RESERVED = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict__) | {
+    "message",
+    "asctime",
+    "taskName",
+}
 
 
 @contextmanager

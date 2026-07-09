@@ -1,8 +1,8 @@
+import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
 import redis
-import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -28,7 +28,7 @@ from app.schemas.enums import JobPriority, JobStatus, JobType
 from app.schemas.payloads import validate_payload
 
 router = APIRouter()
-log = structlog.get_logger("api")
+log = logging.getLogger("app.api")
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -56,7 +56,7 @@ def stats(
     try:
         return gather_stats(session, client, settings)
     except (redis.RedisError, SQLAlchemyError) as exc:
-        log.warning("stats.unavailable", error=str(exc))
+        log.warning("stats.unavailable", extra={"error": str(exc)})
         raise HTTPException(status_code=503, detail="stats unavailable") from exc
 
 

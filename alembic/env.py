@@ -13,7 +13,7 @@ db_url = os.getenv("DATABASE_URL") or config.get_main_option("sqlalchemy.url")
 config.set_main_option("sqlalchemy.url", db_url)
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

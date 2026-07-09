@@ -1,3 +1,4 @@
+import logging
 import signal
 import time
 from collections.abc import Callable
@@ -5,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import redis
-import structlog
 from sqlalchemy.orm import Session
 
 from app import repository as repo
@@ -18,7 +18,7 @@ from app.queue.producer import enqueue
 from app.retry import schedule_retry_or_fail
 from app.schemas.enums import JobStatus
 
-log = structlog.get_logger("ticker")
+log = logging.getLogger("app.ticker")
 
 
 def promote_due(session: Session, client: redis.Redis, settings: Settings) -> int:
@@ -39,7 +39,7 @@ def promote_due(session: Session, client: redis.Redis, settings: Settings) -> in
         routed.append((settings.stream_for_priority(prio), i))
     delayed.promote(client, settings.delayed_zset, routed, ids)
     repo.promote_scheduled_to_pending(session, [UUID(i) for i in ids])
-    log.info("ticker.promoted", enqueued=len(routed), pulled=len(ids))
+    log.info("ticker.promoted", extra={"enqueued": len(routed), "pulled": len(ids)})
     return len(ids)
 
 
@@ -56,7 +56,8 @@ def reconcile_orphans(session: Session, client: redis.Redis, settings: Settings)
             if job.status is JobStatus.scheduled:
                 if job.scheduled_at is None:
                     log.warning(
-                        "ticker.reconcile_skipped_null_scheduled_at", job_id=str(job.id)
+                        "ticker.reconcile_skipped_null_scheduled_at",
+                        extra={"job_id": str(job.id)},
                     )
                     continue
                 delayed.schedule(
@@ -141,7 +142,7 @@ def reap_stale(session: Session, client: redis.Redis, settings: Settings) -> int
             if cursor == "0-0":
                 break
     if handled:
-        log.info("ticker.reaped", count=handled)
+        log.info("ticker.reaped", extra={"count": handled})
     return handled
 
 
@@ -166,7 +167,8 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
         return shutting_down["flag"] or (stop() if stop else False)
 
     log.info(
-        "ticker.started", zset=settings.delayed_zset, streams=settings.ordered_streams
+        "ticker.started",
+        extra={"zset": settings.delayed_zset, "streams": settings.ordered_streams},
     )
     last_reconcile = 0.0
     last_reap = 0.0
@@ -181,7 +183,7 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
                     recovered = reconcile_orphans(session, client, settings)
                 last_reconcile = now
                 if recovered:
-                    log.info("ticker.reconciled", count=recovered)
+                    log.info("ticker.reconciled", extra={"count": recovered})
             if now - last_reap >= settings.reaper_interval_s:
                 with session_factory() as session:
                     reap_stale(session, client, settings)
