@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     retry_backoff_schedule: list[int] = [0, 30, 120]
     max_handler_timeouts_before_recycle: int = 1
     cancel_poll_interval_s: float = 2.0
+    otel_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = "http://localhost:4317"
 
     @model_validator(mode="after")
     def _check_timeout_invariant(self) -> "Settings":
