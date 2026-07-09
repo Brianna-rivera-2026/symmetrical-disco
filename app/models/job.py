@@ -60,6 +60,7 @@ class Job(Base):
     )
     idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     idempotency_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trace_context: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     __table_args__ = (
         Index(

@@ -24,6 +24,7 @@ def create_job(
     max_attempts: int = 4,
     idempotency_key: str | None = None,
     idempotency_hash: str | None = None,
+    trace_context: dict | None = None,
 ) -> Job:
     job = Job(
         type=job_type,
@@ -34,6 +35,7 @@ def create_job(
         max_attempts=max_attempts,
         idempotency_key=idempotency_key,
         idempotency_hash=idempotency_hash,
+        trace_context=trace_context,
     )
     session.add(job)
     session.commit()

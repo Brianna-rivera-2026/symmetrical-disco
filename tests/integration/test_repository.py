@@ -375,3 +375,20 @@ def test_get_by_idempotency_key(db_session):
     found = repo.get_by_idempotency_key(db_session, key)
     assert found is not None and found.id == job.id
     assert found.idempotency_hash == "h1"
+
+
+def test_create_job_persists_trace_context(db_session):
+    carrier = {"traceparent": f"00-{'ab' * 16}-{'cd' * 8}-01"}
+    job = repo.create_job(
+        db_session,
+        JobType.email,
+        {"to": "a@b.com", "subject": "Hi"},
+        trace_context=carrier,
+    )
+    db_session.refresh(job)
+    assert job.trace_context == carrier
+
+
+def test_create_job_trace_context_defaults_to_none(db_session):
+    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    assert job.trace_context is None

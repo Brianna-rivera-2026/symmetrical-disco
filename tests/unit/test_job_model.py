@@ -26,6 +26,7 @@ def test_job_table_and_columns():
         "cancel_requested_at",
         "idempotency_key",
         "idempotency_hash",
+        "trace_context",
     }
 
 

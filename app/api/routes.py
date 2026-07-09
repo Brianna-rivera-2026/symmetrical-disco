@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app import repository as repo
 from app.api.deps import get_db, get_redis
+from app.core.telemetry import current_trace_carrier
 from app.idempotency import canonical_hash
 from app.observability import check_readiness, gather_stats
 from app.queue.delayed import schedule
@@ -73,6 +74,7 @@ def _create_and_handoff(session, client, settings, submission, key, req_hash):
             max_attempts=settings.max_attempts,
             idempotency_key=key,
             idempotency_hash=req_hash,
+            trace_context=current_trace_carrier(),
         )
         schedule(client, settings.delayed_zset, str(job.id), scheduled_at.timestamp())
     else:
@@ -84,6 +86,7 @@ def _create_and_handoff(session, client, settings, submission, key, req_hash):
             max_attempts=settings.max_attempts,
             idempotency_key=key,
             idempotency_hash=req_hash,
+            trace_context=current_trace_carrier(),
         )
         enqueue(client, settings.stream_for_priority(submission.priority), str(job.id))
     repo.mark_synced(session, job.id)
