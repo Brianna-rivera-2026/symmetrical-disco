@@ -53,7 +53,13 @@ comes from `settings.otel_exporter_otlp_endpoint` (default
 
 **Shutdown:** providers are flushed and shut down on exit — API lifespan
 teardown, and at the end of each `run_forever` — so short-lived processes do
-not drop buffered telemetry.
+not drop buffered telemetry. The worker and ticker already register SIGTERM
+and SIGINT handlers that flip the loop's stop flag; the loop then exits
+normally and reaches the flush. This chain (signal → flag → loop exit →
+provider flush) is the pod-termination guarantee and must be preserved — the
+implementation verifies both entrypoints keep these handlers and that the
+flush sits on the path after the loop, before `client.close()` /
+`engine.dispose()`.
 
 ### docker-compose
 
@@ -179,10 +185,19 @@ MeterProvider (no-ops when OTel is disabled). Cardinality: job types ×
    record (app + uvicorn) to the collector; the SDK attaches trace context,
    and `extra`/bound fields become OTel log attributes. Not added when
    `otel_enabled=False`.
+4. **Third-party log levels.** App loggers move under an `app.*` namespace
+   (`app.api`, `app.worker`, `app.ticker`, ...). `configure_logging` sets the
+   root logger to WARNING — every third-party logger (SQLAlchemy, redis,
+   grpc, urllib3, ...) inherits it, so only WARNING+ reaches stdout and the
+   OTel exporter — and sets the `app` logger to `settings.log_level`, so app
+   INFO/DEBUG flows through. The uvicorn loggers are pinned to WARNING
+   explicitly (uvicorn configures its own levels). Keeping the gRPC/OTel SDK
+   loggers at WARNING also rules out an export → log → export feedback loop.
 
 **Call-site refactor:** every module currently using
-`structlog.get_logger(...)` moves to `logging.getLogger(...)`; key-value
-calls (`log.info("job.completed", won=won)`) become
+`structlog.get_logger("worker")` etc. moves to
+`logging.getLogger("app.worker")` (the `app.*` namespace, per above);
+key-value calls (`log.info("job.completed", won=won)`) become
 `log.info("job.completed", extra={"won": won})`;
 `structlog.contextvars.bind_contextvars` / `bound_contextvars` call sites
 (worker loop, ticker) switch to `bind_log_context`. Event names and fields
@@ -262,6 +277,9 @@ Pytest with in-memory OTel exporters (`InMemorySpanExporter`,
 - Logs: the JSON formatter emits `extra` fields and bound context; trace ids
   appear when a span is active and are absent otherwise; `bind_log_context`
   nesting/reset behaves across threads.
+- Log levels: after `configure_logging`, an `app.*` logger emits at INFO
+  while a third-party logger (e.g. `sqlalchemy.engine`) is suppressed below
+  WARNING.
 - Health: `/health` → 200 with a fresh heartbeat, 503 once stale; `/ready` →
   200 with live deps, 503 when Redis is unreachable; API `/ready` carries the
   old `/health` checks and API `/health` is unconditional 200.
