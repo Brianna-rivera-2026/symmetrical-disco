@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add OpenTelemetry traces/metrics/logs across API, worker and ticker with whole-system trace propagation (including scheduled jobs and retries), replace structlog with stdlib logging, and add split `/health` + `/ready` endpoints to every service.
+**Goal:** Add OpenTelemetry traces/metrics/logs across API, worker and ticker with whole-system trace propagation (including scheduled jobs and retries), replace structlog with stdlib logging, and add split `/health` + `/ready` endpoints to every service. Metrics are shaped around two standard models: **RED** (Rate/Errors/Duration) for the job-submission and processing path, and **USE** (Utilization/Saturation) for worker and queue infrastructure.
 
 **Architecture:** A shared `app/core/telemetry.py` configures OTLP providers per service (gated by `otel_enabled`, default off). Trace context is persisted on the job row at submission and re-injected into Redis Stream message fields at every enqueue, so the worker's consumer span always joins the original trace. Worker/ticker get a daemon-thread HTTP health server; telemetry exports to an OTel Collector added to docker-compose.
 
@@ -18,6 +18,7 @@
 - No `print` statements — structured logging with job context only.
 - App loggers live under the `app.*` namespace; third-party loggers must not emit below WARNING.
 - Telemetry must never break the job pipeline: every telemetry code path degrades silently (no-op spans, dropped exports), never raises into app logic.
+- Metrics follow **RED** (application layer: Rate/Errors/Duration of job submission and processing, broken down by job `type` so e.g. failed webhooks are distinguishable from failed emails, and email duration is distinguishable from report duration) and **USE** (infrastructure layer: worker process CPU **U**tilization, and Postgres/Redis queue **S**aturation — jobs pending/processing, consumer-group lag, scheduled backlog). **E**rrors for USE is intentionally not tracked as a separate infra metric — job-level errors are already RED's Errors axis (`jobs.failed`, `jobs.processed{outcome=...}`); duplicating them as an infra metric would be redundant.
 - Run `uv run pytest` before declaring any task complete. Windows dev machine; docker compose available for manual verification.
 - Commit after every task (each task ends with a commit step).
 
@@ -31,11 +32,11 @@ app/core/healthcheck.py        CREATE   Heartbeat, HealthServer, threshold helpe
 app/core/config.py             MODIFY   otel_enabled, otel_exporter_otlp_endpoint, health_port
 app/core/db.py                 MODIFY   pool_timeout=5
 app/models/job.py              MODIFY   trace_context column
-app/repository.py              MODIFY   create_job(trace_context=), get_promotion_info
+app/repository.py              MODIFY   create_job(trace_context=), get_promotion_info, count_by_status
 app/queue/producer.py          MODIFY   producer span + traceparent injection
 app/queue/delayed.py           MODIFY   promote() takes prepared fields
-app/worker/runner.py           MODIFY   handle_message (consumer span), heartbeat, health server
-app/ticker/runner.py           MODIFY   re-injection, ticker spans, gauges, heartbeat, health server
+app/worker/runner.py           MODIFY   handle_message (consumer span), heartbeat, health server, CPU gauge (USE)
+app/ticker/runner.py           MODIFY   re-injection, ticker spans, gauges (USE: queue + saturation), heartbeat, health server
 app/retry.py                   MODIFY   carrier passthrough, jobs.failed metric
 app/api/routes.py              MODIFY   /health-/ready split, trace capture, jobs.submitted
 app/schemas/api.py             MODIFY   LivenessResponse
@@ -1390,7 +1391,12 @@ git commit -m "feat: ticker re-injects stored trace context on promote/reconcile
 
 ---
 
-### Task 8: Metrics — instruments module and emission points
+### Task 8: Metrics — instruments module and emission points (RED method)
+
+These instruments are the **RED** half of the plan's metrics (Rate/Errors/Duration for the job-submission and processing path — see Global Constraints). Each is broken down by job `type` so the dashboards the requirement asks for are a direct read, no derived queries needed:
+- **Rate:** `jobs.submitted` (ingress rate by type/priority) — plus HTTP request rate for free from FastAPI auto-instrumentation (Task 3/13).
+- **Errors:** `jobs.failed` and `jobs.processed{outcome=...}`, both attributed by `type` — a dashboard filtering `outcome=retried|timeout|lost` or `jobs.failed` by `type=webhook` vs `type=email` shows exactly "failed webhooks vs. failed emails" without any extra instrumentation.
+- **Duration:** `job.processing.duration`, attributed by `type` — `type=email` vs `type=report` on the same histogram is the "fast email submission vs. slow report generation" comparison, directly.
 
 **Files:**
 - Create: `app/core/metrics.py`
@@ -1584,23 +1590,41 @@ git commit -m "feat: core job-pipeline metrics across api, worker, retry, ticker
 
 ---
 
-### Task 9: Ticker observable gauges (queue depth, scheduled count)
+### Task 9: Observable gauges — queue/saturation (ticker) + CPU utilization (worker) — USE method
+
+This task is the **USE** half of the plan's metrics (Utilization/Saturation for infrastructure — see Global Constraints):
+- **Saturation:** `queue.depth` (Redis consumer-group lag per stream) and `queue.scheduled` (delayed zset size) are the Redis-side backlog; `jobs.saturation` is the new Postgres-side signal — job counts grouped by status, so "how many jobs are pending vs. processing" is a direct read (`jobs.saturation{status="pending"}` vs `jobs.saturation{status="processing"}`), not a derived query.
+- **Utilization:** `process.cpu.utilization` on the worker process. This system does not run separate worker pods per job type (one worker pool drains all priority streams — see `app/worker/runner.py`'s `read_priority`), so there is no isolated "report-generating worker" to instrument in isolation; the CPU gauge instruments the worker process generically, and `job.processing.duration{type="report"}` (Task 8) is how the report-vs-email cost difference actually shows up. Correlating the two (a worker's CPU gauge rising while its `job.processing.duration{type="report"}` histogram is active) is the intended dashboard read.
 
 **Files:**
-- Modify: `app/ticker/runner.py`
-- Test: `tests/integration/test_ticker.py` (add tests)
+- Modify: `app/ticker/runner.py`, `app/worker/runner.py`, `app/repository.py`, `pyproject.toml`/`uv.lock` (via `uv add`)
+- Test: `tests/integration/test_ticker.py` (add tests), `tests/integration/test_worker.py` (add tests)
 
 **Interfaces:**
-- Consumes: Redis client, `settings.priority_streams`, `settings.delayed_zset`.
-- Produces: `queue_depth_observations(client, settings) -> list[Observation]`, `queue_scheduled_observations(client, settings) -> list[Observation]`, `register_queue_gauges(client, settings) -> None` (called from `run_forever` when `settings.otel_enabled`).
+- Consumes: Redis client, `settings.priority_streams`, `settings.delayed_zset` (ticker); `session_factory` (ticker, for the saturation gauge); nothing new for the worker gauge beyond the `psutil` dependency.
+- Produces:
+  - `repo.count_by_status(session) -> list[tuple[JobStatus, int]]`
+  - `queue_depth_observations(client, settings) -> list[Observation]`, `queue_scheduled_observations(client, settings) -> list[Observation]`, `job_status_observations(session_factory, settings) -> list[Observation]`, `register_ticker_gauges(client, session_factory, settings) -> None` (called from ticker's `run_forever` when `settings.otel_enabled`)
+  - `cpu_utilization_observations() -> list[Observation]`, `register_worker_resource_gauges() -> None` (called from worker's `run_forever` when `settings.otel_enabled`)
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Add the `psutil` dependency**
+
+```bash
+uv add psutil
+```
+
+- [ ] **Step 2: Write the failing tests**
 
 Add to `tests/integration/test_ticker.py`:
 
 ```python
+from app.core.db import make_session_factory
 from app.queue.consumer import ensure_group
-from app.ticker.runner import queue_depth_observations, queue_scheduled_observations
+from app.ticker.runner import (
+    job_status_observations,
+    queue_depth_observations,
+    queue_scheduled_observations,
+)
 
 
 def test_queue_depth_observations(redis_client, test_settings):
@@ -1625,20 +1649,75 @@ def test_observations_swallow_redis_errors(test_settings):
     dead = redis_lib.Redis(host="127.0.0.1", port=1, socket_connect_timeout=0.2)
     assert queue_depth_observations(dead, test_settings) == []
     assert queue_scheduled_observations(dead, test_settings) == []
+
+
+def test_job_status_observations_counts_pending_and_processing(
+    db_session, test_settings, pg_engine
+):
+    repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    repo.claim_job(db_session, job.id)  # -> processing
+
+    observations = job_status_observations(make_session_factory(pg_engine), test_settings)
+    by_status = {o.attributes["status"]: o.value for o in observations}
+    assert by_status["pending"] == 1
+    assert by_status["processing"] == 1
+    assert by_status["completed"] == 0  # zero-filled, not just omitted
+
+
+def test_job_status_observations_swallow_db_errors(test_settings):
+    from app.core.db import make_engine
+
+    dead_factory = make_session_factory(make_engine("postgresql+psycopg://u:p@127.0.0.1:1/x"))
+    assert job_status_observations(dead_factory, test_settings) == []
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+(`repo` and `JobType` are already imported at the top of `tests/integration/test_ticker.py`.)
 
-Run: `uv run pytest tests/integration/test_ticker.py -v -k observations`
-Expected: FAIL — `ImportError: cannot import name 'queue_depth_observations'`.
+Add to `tests/integration/test_worker.py`:
 
-- [ ] **Step 3: Implement in `app/ticker/runner.py`**
+```python
+from app.worker.runner import cpu_utilization_observations
+
+
+def test_cpu_utilization_observations_returns_one_point():
+    observations = cpu_utilization_observations()
+    assert len(observations) == 1
+    assert isinstance(observations[0].value, float)
+    assert observations[0].value >= 0.0
+```
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `uv run pytest tests/integration/test_ticker.py -v -k "observations"`
+Expected: FAIL — `ImportError: cannot import name 'job_status_observations'`.
+
+Run: `uv run pytest tests/integration/test_worker.py -v -k cpu_utilization`
+Expected: FAIL — `ImportError: cannot import name 'cpu_utilization_observations'`.
+
+- [ ] **Step 4: Add `repo.count_by_status`**
+
+In `app/repository.py`, add (mirrors the inline query already in `app/observability.py:gather_stats`, extracted so the ticker can reuse it):
+
+```python
+def count_by_status(session: Session) -> list[tuple[JobStatus, int]]:
+    return session.execute(
+        select(Job.status, func.count()).group_by(Job.status)
+    ).all()
+```
+
+(`select` and `func` are already imported at the top of `app/repository.py`.)
+
+- [ ] **Step 5: Implement the ticker gauges in `app/ticker/runner.py`**
 
 Add imports:
 
 ```python
 from opentelemetry import metrics
 from opentelemetry.metrics import CallbackOptions, Observation
+from sqlalchemy.exc import SQLAlchemyError
+
+from app.observability import zero_fill_status_counts
 ```
 
 Add functions:
@@ -1678,7 +1757,24 @@ def queue_scheduled_observations(
         return []
 
 
-def register_queue_gauges(client: redis.Redis, settings: Settings) -> None:
+def job_status_observations(
+    session_factory: Callable[[], Session], settings: Settings
+) -> list[Observation]:
+    """Postgres queue saturation: job counts by status, zero-filled so every
+    status is always reported. Errors yield no observations — a metrics
+    callback must never raise."""
+    try:
+        with session_factory() as session:
+            rows = repo.count_by_status(session)
+    except SQLAlchemyError:
+        return []
+    counts = zero_fill_status_counts(rows)
+    return [Observation(count, {"status": status}) for status, count in counts.items()]
+
+
+def register_ticker_gauges(
+    client: redis.Redis, session_factory: Callable[[], Session], settings: Settings
+) -> None:
     meter = metrics.get_meter("app.ticker")
     meter.create_observable_gauge(
         "queue.depth",
@@ -1690,26 +1786,74 @@ def register_queue_gauges(client: redis.Redis, settings: Settings) -> None:
         callbacks=[lambda options: queue_scheduled_observations(client, settings)],
         description="Jobs waiting in the delayed zset",
     )
+    meter.create_observable_gauge(
+        "jobs.saturation",
+        callbacks=[lambda options: job_status_observations(session_factory, settings)],
+        description="Job counts by status (Postgres queue saturation)",
+    )
 ```
 
 In `run_forever`, after the `ensure_group` loop:
 
 ```python
     if settings.otel_enabled:
-        register_queue_gauges(client, settings)
+        register_ticker_gauges(client, session_factory, settings)
 ```
 
-(Gated so repeated `run_forever` calls in tests don't register duplicate instruments.)
+(Gated so repeated `run_forever` calls in tests don't register duplicate instruments. `session_factory` is already a local in `run_forever`.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 6: Implement the worker CPU gauge in `app/worker/runner.py`**
+
+Add imports:
+
+```python
+import psutil
+from opentelemetry import metrics
+from opentelemetry.metrics import CallbackOptions, Observation
+
+_process = psutil.Process()
+```
+
+Add functions (near the top, with the other module-level helpers):
+
+```python
+def cpu_utilization_observations() -> list[Observation]:
+    """Ratio (0.0-1.0) of one CPU core the worker process has used since the
+    last call. The first call after process start establishes a baseline and
+    reports 0.0 — expected, since there is no prior interval to measure."""
+    return [Observation(_process.cpu_percent(interval=None) / 100.0)]
+
+
+def register_worker_resource_gauges() -> None:
+    meter = metrics.get_meter("app.worker")
+    meter.create_observable_gauge(
+        "process.cpu.utilization",
+        callbacks=[lambda options: cpu_utilization_observations()],
+        unit="1",
+        description="Worker process CPU utilization (ratio of one core)",
+    )
+```
+
+In `run_forever`, after the `ensure_group` loop:
+
+```python
+    if settings.otel_enabled:
+        register_worker_resource_gauges()
+```
+
+(Gated the same way as the ticker's gauges.)
+
+- [ ] **Step 7: Run tests to verify they pass**
 
 Run: `uv run pytest tests/integration/test_ticker.py -v` — expected: all pass.
+Run: `uv run pytest tests/integration/test_worker.py -v` — expected: all pass.
+Run: `uv run pytest` — expected: all pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add -A
-git commit -m "feat: ticker observable gauges for queue depth and scheduled count"
+git commit -m "feat: USE-method observable gauges — queue/Postgres saturation and worker CPU utilization"
 ```
 
 ---
@@ -2330,7 +2474,8 @@ curl -s -X POST http://localhost:8000/jobs -H "Content-Type: application/json" \
 Then check, in `docker compose logs otel-collector`:
 - Spans named `POST /jobs`, `send jobs:stream:normal`, `process job` sharing one trace ID for the immediate job.
 - For the scheduled job (after ~10s): `ticker.promote` appears, and the `process job` span's trace ID equals the original `POST /jobs` trace ID — the whole-system propagation requirement.
-- Metrics `jobs.submitted`, `jobs.processed`, `job.queue.wait`, `queue.depth`, `queue.scheduled`.
+- Metrics `jobs.submitted`, `jobs.processed`, `job.queue.wait`, `queue.depth`, `queue.scheduled` (RED + Redis-side USE).
+- `jobs.saturation{status=...}` reflecting real pending/processing counts, and `process.cpu.utilization` from the worker (Postgres/CPU-side USE, Task 9).
 - Log records with trace IDs attached; third-party logs absent below WARNING.
 
 Also confirm `docker compose logs api` still shows JSON stdout logs, and `docker compose stop worker` produces a clean `worker.stopped` (signal → flush chain).
