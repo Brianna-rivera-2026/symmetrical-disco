@@ -45,3 +45,18 @@ def test_current_trace_carrier_inside_span(span_exporter):
 
 def test_current_trace_carrier_outside_span_is_none():
     assert current_trace_carrier() is None
+
+
+def test_configure_telemetry_swallows_setup_errors(monkeypatch, caplog):
+    import app.core.telemetry as telemetry_module
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(telemetry_module, "Resource", type(
+        "BrokenResource", (), {"create": staticmethod(_boom)}
+    ))
+    settings = _settings(otel_enabled=True)
+    with caplog.at_level("WARNING"):
+        configure_telemetry(settings, "test-service")  # must not raise
+    assert any("telemetry.configure_failed" in r.message for r in caplog.records)
