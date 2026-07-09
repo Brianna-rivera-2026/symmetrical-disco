@@ -12,10 +12,11 @@ retries); add health check endpoints for the worker and ticker.
 | Question | Decision |
 |---|---|
 | Telemetry backend | OTel Collector only (debug exporter; real backend wired later via collector config) |
-| Worker/ticker health | Tiny HTTP `/health` server per process |
+| Worker/ticker health | Tiny HTTP server per process with split `/health` (liveness) and `/ready` (readiness) |
 | Metrics scope | Core job-pipeline metrics + auto-instrumentation |
-| Logs | Dual: keep structlog stdout JSON, additionally export via OTLP; trace correlation in both |
+| Logs | Remove structlog entirely; stdlib `logging` + OTel export, structured JSON stdout kept |
 | Trace propagation | Persist trace context on the job row (Approach A) |
+| Health probe resources | Borrow from the app's SQLAlchemy engine pool and global Redis client (no fresh connections) |
 
 ## 1. Architecture & infrastructure
 
@@ -35,12 +36,14 @@ It sets up, against a shared `Resource`:
 - `MeterProvider` + `PeriodicExportingMetricReader` + OTLP gRPC metric exporter
 - `LoggerProvider` + `BatchLogRecordProcessor` + OTLP gRPC log exporter,
   attached to the root stdlib logger via `LoggingHandler` (alongside the
-  existing stdout handler, never replacing it)
+  stdout handler, never replacing it)
 
 and applies programmatic auto-instrumentation:
 
 - `SQLAlchemyInstrumentor` and `RedisInstrumentor` in all three services
 - `FastAPIInstrumentor` in the API only
+- `LoggingInstrumentor` in all three services (injects `otelTraceID` /
+  `otelSpanID` into stdlib log records so the stdout formatter can print them)
 
 **Gating:** `settings.otel_enabled: bool = False` (default). When False,
 `configure_telemetry` is a no-op: no providers, no exporters, no network
@@ -63,12 +66,17 @@ not drop buffered telemetry.
 - App services do **not** `depends_on` the collector: if it is down, the SDK
   retries then drops. Observability must never take down the pipeline.
 
-### Dependencies (via `uv add`)
+### Dependencies
 
-`opentelemetry-sdk`, `opentelemetry-exporter-otlp`,
+Added (via `uv add`): `opentelemetry-sdk`, `opentelemetry-exporter-otlp`,
 `opentelemetry-instrumentation-fastapi`,
 `opentelemetry-instrumentation-sqlalchemy`,
-`opentelemetry-instrumentation-redis`.
+`opentelemetry-instrumentation-redis`,
+`opentelemetry-instrumentation-logging`.
+
+Removed (via `uv remove`): `structlog` (see §4). CLAUDE.md is updated in the
+same change: drop structlog from the tech stack list and reword guideline 3 to
+"structured logging with job context via stdlib logging".
 
 ## 2. Tracing & propagation
 
@@ -152,37 +160,79 @@ MeterProvider (no-ops when OTel is disabled). Cardinality: job types ×
 
 ## 4. Logs
 
-The structlog → stdout JSON pipeline is unchanged. Two additions:
+**structlog is removed entirely.** OTel becomes the log pipeline; stdlib
+`logging` becomes the app-facing API. `app/core/logging.py` is rewritten
+(same public entry point `configure_logging`) with stdlib-only pieces:
 
-1. **Trace correlation:** a structlog processor appends `trace_id` and
-   `span_id` (from the active span, when recording) to every event dict — on
-   stdout and OTLP alike.
-2. **OTLP export:** the OTel `LoggingHandler` is added to the root logger
-   alongside the stdout handler. structlog already routes through stdlib
-   `logging`, so all app and uvicorn logs flow to the collector with trace
-   context attached by the SDK. Not added when `otel_enabled=False`.
+1. **Structured stdout stays.** A small custom `logging.Formatter` (~20 lines,
+   no new dependency) renders each record as one JSON line: timestamp, level,
+   logger, message, all `extra` fields, bound context (below), and
+   `otelTraceID`/`otelSpanID` when `LoggingInstrumentor` has injected them.
+   `docker logs` output stays structured and trace-correlated.
+2. **Bound job context survives.** structlog's `contextvars` binding
+   (`job_id`, `message_id`, `stream`, `consumer`) is replaced by a
+   `ContextVar[dict]` plus a `bind_log_context(**fields)` context manager and
+   a `logging.Filter` on the stdout handler and the OTel `LoggingHandler`
+   that merges the bound dict into every record. This keeps CLAUDE.md's
+   "structured logging with job context" rule intact without structlog.
+3. **OTLP export.** The OTel `LoggingHandler` on the root logger ships every
+   record (app + uvicorn) to the collector; the SDK attaches trace context,
+   and `extra`/bound fields become OTel log attributes. Not added when
+   `otel_enabled=False`.
 
-## 5. Health checks (worker & ticker)
+**Call-site refactor:** every module currently using
+`structlog.get_logger(...)` moves to `logging.getLogger(...)`; key-value
+calls (`log.info("job.completed", won=won)`) become
+`log.info("job.completed", extra={"won": won})`;
+`structlog.contextvars.bind_contextvars` / `bound_contextvars` call sites
+(worker loop, ticker) switch to `bind_log_context`. Event names and fields
+are preserved verbatim so existing log-based debugging habits keep working.
+The uvicorn logger hijack in `configure_logging` stays as is.
+
+## 5. Health checks
+
+Liveness and readiness are separate endpoints on every service.
+
+### Worker & ticker
 
 New shared module `app/core/healthcheck.py`: a daemon-thread HTTP server
 (stdlib `http.server`, no new dependency) started at the top of each
-`run_forever`, stopped on shutdown.
+`run_forever`, stopped on shutdown. Setting `health_port: int | None = None`
+— server disabled by default; docker-compose sets `HEALTH_PORT=8001` for
+worker and ticker. Tests bind port 0 (ephemeral).
 
-- Setting `health_port: int | None = None` — server disabled by default;
-  docker-compose sets `HEALTH_PORT=8001` for worker and ticker. Tests bind
-  port 0 (ephemeral).
-- **`GET /health`** returns the API's shape: `200 {"status": "ok", "checks":
-  {...}}` or `503`. Checks:
-  - `loop` — the main loop stamps a shared heartbeat timestamp each iteration;
-    stale beyond a threshold → error. Thresholds: worker
-    `block_ms/1000 + job_handler_timeout_s + 10s` (a worker legitimately
-    blocks on XREADGROUP then runs a job — busy is healthy, hung is not);
-    ticker: `max(10s, 5 × ticker_interval_s)`.
-  - `redis` — `PING`; `postgres` — `SELECT 1` (same pattern as the API's
-    `check_readiness`; a connection per probe is cheap at healthcheck
-    frequency).
-- docker-compose healthcheck blocks for worker and ticker hit
-  `http://localhost:8001/health` (same `python -c urllib` style as the API's).
+- **`GET /health`** (liveness) — loop heartbeat only. The main loop stamps a
+  monotonic timestamp each iteration; reads and writes go through a
+  `threading.Lock` (a bare float write is GIL-atomic today, but the lock
+  makes the invariant explicit and future-proof). Stale beyond a threshold →
+  `503`. Thresholds: worker `block_ms/1000 + job_handler_timeout_s + 10s`
+  (a worker legitimately blocks on XREADGROUP then runs a job — busy is
+  healthy, hung is not); ticker: `max(10s, 5 × ticker_interval_s)`.
+- **`GET /ready`** (readiness) — dependency checks using the **application's
+  own resources**, not fresh connections: `engine.connect()` borrows from the
+  process's existing SQLAlchemy pool for `SELECT 1`, and the process's global
+  Redis client issues `PING`. This proves the app can still talk to the
+  stores through its configured resources. The engine and client created in
+  `run_forever` are handed to the health server. Probes use short timeouts
+  (bounded pool-checkout wait) so an exhausted pool degrades to a `503`
+  rather than a hanging probe. Both endpoints return the API's response
+  shape: `200/503 {"status": ..., "checks": {...}}`.
+
+### API
+
+For consistency, the API's endpoints split the same way: `GET /health`
+becomes pure liveness (always `200 {"status": "ok"}` if the process serves
+requests), and the existing dependency checks (`check_readiness`) move to a
+new `GET /ready`. The API already uses its request-scoped session and shared
+Redis client via dependencies, which satisfies the borrowed-resources rule.
+
+### docker-compose probes
+
+- `api`: probe `/ready` (it gates `depends_on` consumers and real traffic).
+- `worker` / `ticker`: probe `/health` on port 8001 — a wedged loop is the
+  restart-actionable signal; Redis being down is not fixed by restarting a
+  worker. `/ready` remains available for humans and future orchestrators.
+- All probes keep the existing `python -c urllib` one-liner style.
 
 No dedicated health metrics: the heartbeat plus the queue gauges cover it.
 
@@ -209,9 +259,11 @@ Pytest with in-memory OTel exporters (`InMemorySpanExporter`,
 - Ticker re-injection: `promote_due` on a job with stored `trace_context` →
   the XADD'd fields contain the original traceparent.
 - Metrics: `jobs.processed` increments with the correct outcome attributes.
-- Logs: the structlog processor adds `trace_id` when a span is active and
-  nothing otherwise.
-- Health: 200 with a fresh heartbeat; 503 with a stale heartbeat or Redis
-  down.
+- Logs: the JSON formatter emits `extra` fields and bound context; trace ids
+  appear when a span is active and are absent otherwise; `bind_log_context`
+  nesting/reset behaves across threads.
+- Health: `/health` → 200 with a fresh heartbeat, 503 once stale; `/ready` →
+  200 with live deps, 503 when Redis is unreachable; API `/ready` carries the
+  old `/health` checks and API `/health` is unconditional 200.
 - Compose/collector wiring is verified manually (`docker compose up`, watch
   the collector's debug output) — no pytest for infra config.
