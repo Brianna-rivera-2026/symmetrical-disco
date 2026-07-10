@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app import repository as repo
 from app.core.config import Settings
 from app.core.db import make_engine, make_session_factory
+from app.core.healthcheck import Heartbeat, HealthServer, worker_heartbeat_threshold_s
 from app.core import metrics as app_metrics
 from app.core.logging import bind_log_context, bind_static_log_context
 from app.core.redis import create_redis_client
@@ -191,6 +192,21 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
     client = create_redis_client(settings.redis_url)
+
+    heartbeat = Heartbeat()
+    health_server: HealthServer | None = None
+    if settings.health_port is not None:
+        # Bind failure raises out of run_forever: fail fast, compose restarts —
+        # a silently absent healthcheck is worse than a restart.
+        health_server = HealthServer(
+            port=settings.health_port,
+            heartbeat=heartbeat,
+            max_heartbeat_age_s=worker_heartbeat_threshold_s(settings),
+            engine=engine,
+            redis_client=client,
+        )
+        health_server.start()
+
     for stream in settings.ordered_streams:
         ensure_group(client, stream, settings.consumer_group)
 
@@ -217,6 +233,7 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
     timeouts = 0
     exit_code = 0
     while not _should_stop():
+        heartbeat.beat()
         batch = read_priority(
             client,
             settings.ordered_streams,
@@ -238,6 +255,8 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
             break
 
     log.info("worker.stopped", extra={"exit_code": exit_code})
+    if health_server is not None:
+        health_server.stop()
     client.close()
     engine.dispose()
     return exit_code

@@ -15,6 +15,7 @@ from app import repository as repo
 from app.core import metrics as app_metrics
 from app.core.config import Settings
 from app.core.db import make_engine, make_session_factory
+from app.core.healthcheck import Heartbeat, HealthServer, ticker_heartbeat_threshold_s
 from app.core.redis import create_redis_client
 from app.observability import zero_fill_status_counts
 from app.queue import delayed
@@ -250,6 +251,21 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
     client = create_redis_client(settings.redis_url)
+
+    heartbeat = Heartbeat()
+    health_server: HealthServer | None = None
+    if settings.health_port is not None:
+        # Bind failure raises out of run_forever: fail fast, compose restarts —
+        # a silently absent healthcheck is worse than a restart.
+        health_server = HealthServer(
+            port=settings.health_port,
+            heartbeat=heartbeat,
+            max_heartbeat_age_s=ticker_heartbeat_threshold_s(settings),
+            engine=engine,
+            redis_client=client,
+        )
+        health_server.start()
+
     # Make sure the consumer group exists before we XADD, so workers created
     # later (group id "$") don't miss jobs the ticker has already promoted.
     for stream in settings.ordered_streams:
@@ -277,6 +293,7 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
     last_reap = 0.0
 
     while not _should_stop():
+        heartbeat.beat()
         try:
             with session_factory() as session:
                 promoted = promote_due(session, client, settings)
@@ -300,5 +317,7 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
             time.sleep(settings.ticker_interval_s)
 
     log.info("ticker.stopped")
+    if health_server is not None:
+        health_server.stop()
     client.close()
     engine.dispose()
