@@ -17,6 +17,11 @@ class Job(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        sa.ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     type: Mapped[JobType] = mapped_column(SAEnum(JobType, name="job_type"))
     payload: Mapped[dict] = mapped_column(JSONB)
     status: Mapped[JobStatus] = mapped_column(
@@ -64,12 +69,14 @@ class Job(Base):
 
     __table_args__ = (
         Index(
-            "uq_jobs_idempotency_key",
+            "uq_jobs_user_idempotency_key",
+            "user_id",
             "idempotency_key",
             unique=True,
             postgresql_where=sa.text("idempotency_key IS NOT NULL"),
         ),
         Index("ix_jobs_status_created_at", "status", "created_at"),
+        Index("ix_jobs_user_id_created_at_id", "user_id", "created_at", "id"),
     )
 
     def __init__(self, **kwargs: object) -> None:
