@@ -26,8 +26,12 @@ def test_cancel_scheduled_zrems_from_delayed(client):
     assert client.app.state.redis.zcard(settings.delayed_zset) == 0
 
 
-def test_cancel_processing_returns_202_and_sets_flag(client, db_session, default_user_id):
-    job = repo.create_job(db_session, JobType.batch, {"items": []}, user_id=default_user_id)
+def test_cancel_processing_returns_202_and_sets_flag(
+    client, db_session, default_user_id
+):
+    job = repo.create_job(
+        db_session, JobType.batch, {"items": []}, user_id=default_user_id
+    )
     repo.claim_job(db_session, job.id)  # -> processing
     resp = client.post(f"/jobs/{job.id}/cancel")
     assert resp.status_code == 202
@@ -57,7 +61,9 @@ def test_cancel_unknown_returns_404(client):
 
 
 def test_job_out_exposes_progress_field(client, db_session, default_user_id):
-    job = repo.create_job(db_session, JobType.batch, {"items": []}, user_id=default_user_id)
+    job = repo.create_job(
+        db_session, JobType.batch, {"items": []}, user_id=default_user_id
+    )
     got = client.get(f"/jobs/{job.id}").json()
     assert "progress" in got
     assert got["progress"] is None

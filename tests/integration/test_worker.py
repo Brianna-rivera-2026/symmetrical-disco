@@ -245,7 +245,13 @@ def test_consumer_span_without_traceparent_starts_new_trace(
 
 
 def test_consumer_span_records_handler_error(
-    db_session, redis_client, test_settings, pg_engine, span_exporter, monkeypatch, owner_id
+    db_session,
+    redis_client,
+    test_settings,
+    pg_engine,
+    span_exporter,
+    monkeypatch,
+    owner_id,
 ):
     monkeypatch.setattr(handlers.random, "random", lambda: 0.05)  # force webhook fail
     for stream in test_settings.ordered_streams:
@@ -300,7 +306,7 @@ def test_ownerless_job_is_dropped_not_executed(
 
 
 def test_owned_job_still_processes(db_session, redis_client, test_settings, owner_id):
-    from app.schemas.enums import JobStatus, JobType
+    from app.schemas.enums import JobType
     from app.worker.runner import process_job
 
     job = repo.create_job(

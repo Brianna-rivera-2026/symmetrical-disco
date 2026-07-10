@@ -37,12 +37,8 @@ def test_cross_user_get_retry_cancel_are_404(client, second_user):
 
     assert client.get(f"/jobs/{job_id}").status_code == 200
     assert client.get(f"/jobs/{job_id}", headers=second_user).status_code == 404
-    assert (
-        client.post(f"/jobs/{job_id}/retry", headers=second_user).status_code == 404
-    )
-    assert (
-        client.post(f"/jobs/{job_id}/cancel", headers=second_user).status_code == 404
-    )
+    assert client.post(f"/jobs/{job_id}/retry", headers=second_user).status_code == 404
+    assert client.post(f"/jobs/{job_id}/cancel", headers=second_user).status_code == 404
 
 
 def test_list_returns_only_own_jobs(client, second_user):
