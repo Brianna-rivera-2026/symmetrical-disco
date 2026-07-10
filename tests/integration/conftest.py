@@ -123,3 +123,13 @@ def second_user(pg_engine):
         repo.upsert_user(session, "second-user", hash_key(SECOND_TEST_KEY))
         session.commit()
     return {"X-API-Key": SECOND_TEST_KEY}
+
+
+@pytest.fixture
+def owner_id(pg_engine):
+    """A persisted user id for tests that create jobs directly via the repo."""
+    factory = _make_session_factory(pg_engine)
+    with factory() as session:
+        uid = repo.upsert_user(session, "job-owner", hash_key("job-owner-key"))
+        session.commit()
+    return uid

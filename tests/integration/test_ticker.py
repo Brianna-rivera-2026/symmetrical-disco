@@ -154,7 +154,7 @@ def test_run_forever_promotes_then_stops(redis_client, test_settings, pg_engine)
 
 
 def test_end_to_end_scheduled_job_completes(
-    db_session, redis_client, test_settings, pg_engine
+    db_session, redis_client, test_settings, pg_engine, owner_id
 ):
     """Submit a scheduled job, promote it, then process it — asserts completed status."""
     from app.queue.consumer import ensure_group
@@ -170,6 +170,7 @@ def test_end_to_end_scheduled_job_completes(
         {"to": "a@b.com", "subject": "Hi"},
         status=JobStatus.scheduled,
         scheduled_at=when,
+        user_id=owner_id,
     )
     delayed.schedule(
         redis_client, test_settings.delayed_zset, str(job.id), when.timestamp()
@@ -185,7 +186,7 @@ def test_end_to_end_scheduled_job_completes(
 
 
 def test_duplicate_promotion_second_claim_is_noop(
-    db_session, redis_client, test_settings, pg_engine
+    db_session, redis_client, test_settings, pg_engine, owner_id
 ):
     """Promote the same job twice; second worker claim must be a no-op."""
     from app.queue.consumer import ensure_group
@@ -201,6 +202,7 @@ def test_duplicate_promotion_second_claim_is_noop(
         {"to": "a@b.com", "subject": "Hi"},
         status=JobStatus.scheduled,
         scheduled_at=when,
+        user_id=owner_id,
     )
     # Manually add the job to the ZSET twice to simulate a crash-recovery re-promotion.
     delayed.schedule(

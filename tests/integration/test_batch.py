@@ -34,7 +34,7 @@ def test_pg_context_writes_progress_and_reads_cancel(db_session, pg_engine):
 
 
 def test_batch_completes_with_progress_100(
-    db_session, redis_client, test_settings, pg_engine
+    db_session, redis_client, test_settings, pg_engine, owner_id
 ):
     sf = make_session_factory(pg_engine)
     job = repo.create_job(
@@ -46,6 +46,7 @@ def test_batch_completes_with_progress_100(
                 {"type": "report", "report_type": "sales"},
             ]
         },
+        user_id=owner_id,
     )
     outcome = process_job(db_session, redis_client, test_settings, job.id, sf)
     assert outcome.label == "completed"
@@ -57,7 +58,7 @@ def test_batch_completes_with_progress_100(
 
 
 def test_tiny_batch_reaches_progress_100_without_polling(
-    db_session, redis_client, test_settings, pg_engine
+    db_session, redis_client, test_settings, pg_engine, owner_id
 ):
     # poll interval is huge, so the poll loop never writes progress; completion must
     # still land it on 100 (type-driven, not IS NOT NULL).
@@ -67,13 +68,16 @@ def test_tiny_batch_reaches_progress_100_without_polling(
         db_session,
         JobType.batch,
         {"items": [{"type": "email", "to": "a@b.com", "subject": "Hi"}]},
+        user_id=owner_id,
     )
     process_job(db_session, redis_client, settings, job.id, sf)
     db_session.refresh(job)
     assert job.progress == 100
 
 
-def test_batch_cooperative_cancel(db_session, redis_client, test_settings, pg_engine):
+def test_batch_cooperative_cancel(
+    db_session, redis_client, test_settings, pg_engine, owner_id
+):
     sf = make_session_factory(pg_engine)
     job = repo.create_job(
         db_session,
@@ -85,6 +89,7 @@ def test_batch_cooperative_cancel(db_session, redis_client, test_settings, pg_en
                 {"type": "email", "to": "a@b.com", "subject": "3"},
             ]
         },
+        user_id=owner_id,
     )
     # Simulate "cancel arrived just as processing begins": stamp the flag on the row
     # so the handler's first poll sees it. (claim_job leaves cancel_requested_at intact.)

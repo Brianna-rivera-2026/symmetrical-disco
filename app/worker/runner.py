@@ -94,6 +94,13 @@ def process_job(
     span.set_attribute("job.type", job.type.value)
     span.set_attribute("job.priority", job.priority.value)
     span.set_attribute("job.attempt", job.attempts + 1)
+    if job.user_id is None:
+        won = repo.fail_job(session, job.id, {"reason": "ownerless job dropped"})
+        app_metrics.jobs_dropped_ownerless.add(1)
+        log.warning("job.dropped_ownerless", extra={"won": won})
+        _record_outcome(job, "dropped_ownerless", started)
+        return Outcome(ack=won, recycle=False, label="dropped_ownerless")
+    span.set_attribute("enduser.id", str(job.user_id))
     is_batch = job.type == JobType.batch
     if is_batch:
         repo.init_progress(session, job.id)

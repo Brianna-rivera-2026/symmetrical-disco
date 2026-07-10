@@ -23,9 +23,11 @@ def _points(metric_reader, name):
 
 
 def test_jobs_processed_counts_completed(
-    db_session, redis_client, test_settings, metric_reader
+    db_session, redis_client, test_settings, metric_reader, owner_id
 ):
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    job = repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
+    )
     process_job(db_session, redis_client, test_settings, job.id)
     points = _points(metric_reader, "jobs.processed")
     completed = [
@@ -38,9 +40,11 @@ def test_jobs_processed_counts_completed(
 
 
 def test_processing_duration_recorded(
-    db_session, redis_client, test_settings, metric_reader
+    db_session, redis_client, test_settings, metric_reader, owner_id
 ):
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    job = repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
+    )
     process_job(db_session, redis_client, test_settings, job.id)
     points = _points(metric_reader, "job.processing.duration")
     assert any(
@@ -49,11 +53,15 @@ def test_processing_duration_recorded(
 
 
 def test_jobs_failed_counts_exhausted_attempts(
-    db_session, redis_client, test_settings, metric_reader, monkeypatch
+    db_session, redis_client, test_settings, metric_reader, monkeypatch, owner_id
 ):
     monkeypatch.setattr(handlers.random, "random", lambda: 0.05)
     job = repo.create_job(
-        db_session, JobType.webhook, {"url": "https://x.test"}, max_attempts=1
+        db_session,
+        JobType.webhook,
+        {"url": "https://x.test"},
+        max_attempts=1,
+        user_id=owner_id,
     )
     process_job(db_session, redis_client, test_settings, job.id)
     points = _points(metric_reader, "jobs.failed")

@@ -24,8 +24,10 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr(handlers.time, "sleep", lambda *_: None)
 
 
-def test_process_job_completes_email(db_session, redis_client, test_settings):
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+def test_process_job_completes_email(db_session, redis_client, test_settings, owner_id):
+    job = repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
+    )
     outcome = process_job(db_session, redis_client, test_settings, job.id)
     assert outcome.label == "completed"
     assert outcome.ack is True
@@ -35,10 +37,12 @@ def test_process_job_completes_email(db_session, redis_client, test_settings):
 
 
 def test_process_job_retries_on_handler_failure(
-    db_session, redis_client, test_settings, monkeypatch
+    db_session, redis_client, test_settings, monkeypatch, owner_id
 ):
     monkeypatch.setattr(handlers.random, "random", lambda: 0.05)  # force webhook fail
-    job = repo.create_job(db_session, JobType.webhook, {"url": "https://x.test"})
+    job = repo.create_job(
+        db_session, JobType.webhook, {"url": "https://x.test"}, user_id=owner_id
+    )
     outcome = process_job(db_session, redis_client, test_settings, job.id)
     assert outcome.label == "retried"
     db_session.refresh(job)
@@ -48,11 +52,15 @@ def test_process_job_retries_on_handler_failure(
 
 
 def test_process_job_permanent_fail_when_attempts_exhausted(
-    db_session, redis_client, test_settings, monkeypatch
+    db_session, redis_client, test_settings, monkeypatch, owner_id
 ):
     monkeypatch.setattr(handlers.random, "random", lambda: 0.05)
     job = repo.create_job(
-        db_session, JobType.webhook, {"url": "https://x.test"}, max_attempts=1
+        db_session,
+        JobType.webhook,
+        {"url": "https://x.test"},
+        max_attempts=1,
+        user_id=owner_id,
     )
     outcome = process_job(db_session, redis_client, test_settings, job.id)
     assert outcome.ack is True
@@ -70,11 +78,13 @@ def test_process_job_skips_unclaimable(db_session, redis_client, test_settings):
 
 
 def test_process_job_timeout_recycles(
-    db_session, redis_client, test_settings, monkeypatch
+    db_session, redis_client, test_settings, monkeypatch, owner_id
 ):
     settings = test_settings.model_copy(update={"job_handler_timeout_s": 0.05})
     monkeypatch.setattr(handlers.time, "sleep", lambda *_: _real_sleep(0.5))
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    job = repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
+    )
     outcome = process_job(db_session, redis_client, settings, job.id)
     assert outcome.recycle is True
     db_session.refresh(job)
@@ -82,7 +92,9 @@ def test_process_job_timeout_recycles(
     assert job.attempts == 1
 
 
-def test_run_forever_processes_one_then_stops(test_settings, redis_client, pg_engine):
+def test_run_forever_processes_one_then_stops(
+    test_settings, redis_client, pg_engine, owner_id
+):
     from app.core.db import make_session_factory
     from app.queue.consumer import ensure_group
     from app.queue.producer import enqueue
@@ -92,7 +104,9 @@ def test_run_forever_processes_one_then_stops(test_settings, redis_client, pg_en
         ensure_group(redis_client, stream, test_settings.consumer_group)
     factory = make_session_factory(pg_engine)
     with factory() as s:
-        job = repo.create_job(s, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+        job = repo.create_job(
+            s, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
+        )
     enqueue(redis_client, test_settings.stream_normal, str(job.id))
 
     calls = {"n": 0}
@@ -108,7 +122,9 @@ def test_run_forever_processes_one_then_stops(test_settings, redis_client, pg_en
         assert repo.get_job(s, job.id).status is JobStatus.completed
 
 
-def test_run_forever_drains_high_before_low(test_settings, redis_client, pg_engine):
+def test_run_forever_drains_high_before_low(
+    test_settings, redis_client, pg_engine, owner_id
+):
     from app.core.db import make_session_factory
     from app.queue.consumer import ensure_group
     from app.queue.producer import enqueue
@@ -123,12 +139,14 @@ def test_run_forever_drains_high_before_low(test_settings, redis_client, pg_engi
             JobType.email,
             {"to": "a@b.com", "subject": "Hi"},
             priority=JobPriority.low,
+            user_id=owner_id,
         )
         high = repo.create_job(
             s,
             JobType.email,
             {"to": "a@b.com", "subject": "Hi"},
             priority=JobPriority.high,
+            user_id=owner_id,
         )
     enqueue(redis_client, test_settings.stream_low, str(low.id))
     enqueue(redis_client, test_settings.stream_high, str(high.id))
@@ -167,11 +185,13 @@ def _read_one(redis_client, test_settings):
 
 
 def test_consumer_span_joins_producer_trace(
-    db_session, redis_client, test_settings, pg_engine, span_exporter
+    db_session, redis_client, test_settings, pg_engine, span_exporter, owner_id
 ):
     for stream in test_settings.ordered_streams:
         ensure_group(redis_client, stream, test_settings.consumer_group)
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    job = repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
+    )
     tracer = trace.get_tracer("test")
     with tracer.start_as_current_span("submit") as submit_span:
         enqueue(redis_client, test_settings.stream_normal, str(job.id))
@@ -202,11 +222,13 @@ def test_consumer_span_joins_producer_trace(
 
 
 def test_consumer_span_without_traceparent_starts_new_trace(
-    db_session, redis_client, test_settings, pg_engine, span_exporter
+    db_session, redis_client, test_settings, pg_engine, span_exporter, owner_id
 ):
     for stream in test_settings.ordered_streams:
         ensure_group(redis_client, stream, test_settings.consumer_group)
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    job = repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
+    )
     redis_client.xadd(
         test_settings.stream_normal, {"job_id": str(job.id)}
     )  # legacy shape
@@ -223,12 +245,14 @@ def test_consumer_span_without_traceparent_starts_new_trace(
 
 
 def test_consumer_span_records_handler_error(
-    db_session, redis_client, test_settings, pg_engine, span_exporter, monkeypatch
+    db_session, redis_client, test_settings, pg_engine, span_exporter, monkeypatch, owner_id
 ):
     monkeypatch.setattr(handlers.random, "random", lambda: 0.05)  # force webhook fail
     for stream in test_settings.ordered_streams:
         ensure_group(redis_client, stream, test_settings.consumer_group)
-    job = repo.create_job(db_session, JobType.webhook, {"url": "https://x.test"})
+    job = repo.create_job(
+        db_session, JobType.webhook, {"url": "https://x.test"}, user_id=owner_id
+    )
     enqueue(redis_client, test_settings.stream_normal, str(job.id))
     stream, message_id, fields = _read_one(redis_client, test_settings)
     handle_message(
@@ -252,3 +276,38 @@ def test_cpu_utilization_observations_returns_one_point():
     assert len(observations) == 1
     assert isinstance(observations[0].value, float)
     assert observations[0].value >= 0.0
+
+
+def test_ownerless_job_is_dropped_not_executed(
+    db_session, redis_client, test_settings, owner_id
+):
+    from app.schemas.enums import JobStatus, JobType
+    from app.worker.runner import process_job
+
+    job = repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "s"}
+    )  # no user_id -> ownerless
+
+    outcome = process_job(db_session, redis_client, test_settings, job.id)
+
+    assert outcome.label == "dropped_ownerless"
+    assert outcome.ack is True
+    db_session.expire_all()
+    refreshed = repo.get_job(db_session, job.id)
+    assert refreshed.status is JobStatus.failed
+    assert refreshed.error == {"reason": "ownerless job dropped"}
+    assert refreshed.result is None  # handler never ran
+
+
+def test_owned_job_still_processes(db_session, redis_client, test_settings, owner_id):
+    from app.schemas.enums import JobStatus, JobType
+    from app.worker.runner import process_job
+
+    job = repo.create_job(
+        db_session,
+        JobType.email,
+        {"to": "a@b.com", "subject": "s"},
+        user_id=owner_id,
+    )
+    outcome = process_job(db_session, redis_client, test_settings, job.id)
+    assert outcome.label == "completed"
