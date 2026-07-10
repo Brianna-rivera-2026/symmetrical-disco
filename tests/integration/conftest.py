@@ -43,7 +43,7 @@ def db_session(pg_engine):
     finally:
         session.close()
         with pg_engine.begin() as conn:
-            conn.execute(text("TRUNCATE TABLE jobs"))
+            conn.execute(text("TRUNCATE TABLE jobs, users"))
 
 
 @pytest.fixture(scope="session")
@@ -73,7 +73,7 @@ def client(pg_engine, test_settings):
     with TestClient(app) as c:
         yield c
     with pg_engine.begin() as conn:
-        conn.execute(text("TRUNCATE TABLE jobs"))
+        conn.execute(text("TRUNCATE TABLE jobs, users"))
     # Some tests swap app.state.redis for a broken client to simulate an outage;
     # flush the real backing instance directly so teardown never depends on
     # whatever connection a test left in place.

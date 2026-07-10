@@ -34,6 +34,19 @@ router = APIRouter()
 log = logging.getLogger("app.api")
 
 
+def _get_by_idempotency_key_unscoped(session, key):
+    """Temporary shim: routes have no authenticated user until Task 5 adds
+    the auth dependency, so we can't yet supply the now-required user_id to
+    repo.get_by_idempotency_key. Task 5 deletes this."""
+    from sqlalchemy import select
+
+    from app.models.job import Job
+
+    return session.execute(
+        select(Job).where(Job.idempotency_key == key)
+    ).scalar_one_or_none()
+
+
 @router.get("/health", response_model=LivenessResponse)
 def health() -> LivenessResponse:
     """Liveness: the process is serving requests."""
@@ -149,14 +162,14 @@ def submit_job(
         return _accepted(job)
 
     req_hash = canonical_hash(submission.type, submission.payload)
-    existing = repo.get_by_idempotency_key(session, key)
+    existing = _get_by_idempotency_key_unscoped(session, key)
     if existing is not None:
         return _replay_or_conflict(existing, req_hash, response)
     try:
         job = _create_and_handoff(session, client, settings, submission, key, req_hash)
     except IntegrityError:
         session.rollback()
-        existing = repo.get_by_idempotency_key(session, key)
+        existing = _get_by_idempotency_key_unscoped(session, key)
         return _replay_or_conflict(existing, req_hash, response)
     return _accepted(job)
 

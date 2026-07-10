@@ -366,16 +366,19 @@ def test_cancel_job_guarded_terminal(db_session):
 
 
 def test_get_by_idempotency_key(db_session):
+    owner = repo.upsert_user(db_session, "owner", "h-owner")
+    db_session.commit()
     key = "abc"
-    assert repo.get_by_idempotency_key(db_session, key) is None
+    assert repo.get_by_idempotency_key(db_session, key, owner) is None
     job = repo.create_job(
         db_session,
         JobType.email,
         {"to": "a", "subject": "b"},
+        user_id=owner,
         idempotency_key=key,
         idempotency_hash="h1",
     )
-    found = repo.get_by_idempotency_key(db_session, key)
+    found = repo.get_by_idempotency_key(db_session, key, owner)
     assert found is not None and found.id == job.id
     assert found.idempotency_hash == "h1"
 
@@ -395,3 +398,77 @@ def test_create_job_persists_trace_context(db_session):
 def test_create_job_trace_context_defaults_to_none(db_session):
     job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
     assert job.trace_context is None
+
+
+def test_upsert_user_inserts_then_rotates(db_session):
+    from sqlalchemy import select
+
+    from app.models.user import User
+
+    uid1 = repo.upsert_user(db_session, "alice", "hash-one")
+    db_session.commit()
+    uid2 = repo.upsert_user(db_session, "alice", "hash-two")
+    db_session.commit()
+
+    assert uid1 == uid2  # same row, key rotated
+    row = db_session.execute(select(User).where(User.name == "alice")).scalar_one()
+    assert row.key_hash == "hash-two"
+
+
+def test_get_user_by_key_hash(db_session):
+    uid = repo.upsert_user(db_session, "alice", "hash-one")
+    db_session.commit()
+    found = repo.get_user_by_key_hash(db_session, "hash-one")
+    assert found is not None and found.id == uid
+    assert repo.get_user_by_key_hash(db_session, "wrong") is None
+
+
+def test_get_job_scoped_to_owner(db_session):
+    from app.schemas.enums import JobType
+
+    owner = repo.upsert_user(db_session, "owner", "h-owner")
+    other = repo.upsert_user(db_session, "other", "h-other")
+    db_session.commit()
+    job = repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "s"}, user_id=owner
+    )
+
+    assert repo.get_job(db_session, job.id, user_id=owner) is not None
+    assert repo.get_job(db_session, job.id, user_id=other) is None
+    assert repo.get_job(db_session, job.id) is not None  # unscoped (internal)
+
+
+def test_list_jobs_scoped_to_owner(db_session):
+    from app.schemas.enums import JobType
+
+    owner = repo.upsert_user(db_session, "owner", "h-owner")
+    other = repo.upsert_user(db_session, "other", "h-other")
+    db_session.commit()
+    mine = repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "s"}, user_id=owner
+    )
+    repo.create_job(
+        db_session, JobType.email, {"to": "c@d.com", "subject": "s"}, user_id=other
+    )
+
+    rows, _ = repo.list_jobs(db_session, user_id=owner)
+    assert [j.id for j in rows] == [mine.id]
+
+
+def test_idempotency_lookup_scoped_per_user(db_session):
+    from app.schemas.enums import JobType
+
+    owner = repo.upsert_user(db_session, "owner", "h-owner")
+    other = repo.upsert_user(db_session, "other", "h-other")
+    db_session.commit()
+    job = repo.create_job(
+        db_session,
+        JobType.email,
+        {"to": "a@b.com", "subject": "s"},
+        user_id=owner,
+        idempotency_key="k1",
+        idempotency_hash="x",
+    )
+
+    assert repo.get_by_idempotency_key(db_session, "k1", owner).id == job.id
+    assert repo.get_by_idempotency_key(db_session, "k1", other) is None

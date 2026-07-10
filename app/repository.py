@@ -1,11 +1,14 @@
+import uuid as uuid_mod
 from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import func, select, tuple_, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.cursor import decode_cursor, encode_cursor
 from app.models.job import Job
+from app.models.user import User
 from app.schemas.enums import JobPriority, JobStatus, JobType
 
 
@@ -25,6 +28,7 @@ def create_job(
     idempotency_key: str | None = None,
     idempotency_hash: str | None = None,
     trace_context: dict | None = None,
+    user_id: UUID | None = None,
 ) -> Job:
     job = Job(
         type=job_type,
@@ -36,6 +40,7 @@ def create_job(
         idempotency_key=idempotency_key,
         idempotency_hash=idempotency_hash,
         trace_context=trace_context,
+        user_id=user_id,
     )
     session.add(job)
     session.commit()
@@ -43,8 +48,16 @@ def create_job(
     return job
 
 
-def get_job(session: Session, job_id: UUID) -> Job | None:
-    return session.get(Job, job_id)
+def get_job(
+    session: Session, job_id: UUID, *, user_id: UUID | None = None
+) -> Job | None:
+    """user_id=None is the unscoped internal form (worker, post-ownership
+    re-reads). API routes must always pass the caller's id."""
+    if user_id is None:
+        return session.get(Job, job_id)
+    return session.execute(
+        select(Job).where(Job.id == job_id, Job.user_id == user_id)
+    ).scalar_one_or_none()
 
 
 def list_jobs(
@@ -53,6 +66,7 @@ def list_jobs(
     status: JobStatus | None = None,
     job_type: JobType | None = None,
     priority: JobPriority | None = None,
+    user_id: UUID | None = None,
     limit: int = 50,
     cursor: str | None = None,
 ) -> tuple[list[Job], str | None]:
@@ -63,6 +77,8 @@ def list_jobs(
         stmt = stmt.where(Job.type == job_type)
     if priority is not None:
         stmt = stmt.where(Job.priority == priority)
+    if user_id is not None:
+        stmt = stmt.where(Job.user_id == user_id)
     if cursor is not None:
         c_created, c_id = decode_cursor(cursor)
         stmt = stmt.where(tuple_(Job.created_at, Job.id) < (c_created, c_id))
@@ -257,11 +273,29 @@ def cancel_job(session: Session, job_id: UUID, summary: dict) -> bool:
     return res.rowcount == 1
 
 
-def get_by_idempotency_key(session: Session, key: str) -> Job | None:
+def get_by_idempotency_key(session: Session, key: str, user_id: UUID) -> Job | None:
     return session.execute(
-        select(Job).where(Job.idempotency_key == key)
+        select(Job).where(Job.idempotency_key == key, Job.user_id == user_id)
     ).scalar_one_or_none()
 
 
 def count_by_status(session: Session) -> list[tuple[JobStatus, int]]:
     return session.execute(select(Job.status, func.count()).group_by(Job.status)).all()
+
+
+def upsert_user(session: Session, name: str, key_hash: str) -> UUID:
+    """Insert a user or rotate their key hash. Does NOT commit — the caller
+    owns the transaction so multi-user syncs stay atomic."""
+    stmt = (
+        pg_insert(User)
+        .values(id=uuid_mod.uuid4(), name=name, key_hash=key_hash)
+        .on_conflict_do_update(index_elements=["name"], set_={"key_hash": key_hash})
+        .returning(User.id)
+    )
+    return session.execute(stmt).scalar_one()
+
+
+def get_user_by_key_hash(session: Session, key_hash: str) -> User | None:
+    return session.execute(
+        select(User).where(User.key_hash == key_hash)
+    ).scalar_one_or_none()
