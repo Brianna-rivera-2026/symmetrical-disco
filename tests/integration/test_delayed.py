@@ -26,7 +26,7 @@ def test_promote_moves_ids_to_stream_and_removes(redis_client):
     delayed.promote(
         redis_client,
         ZSET,
-        [(STREAM, "a"), (STREAM, "b")],
+        [(STREAM, {"job_id": "a"}), (STREAM, {"job_id": "b"})],
         ["a", "b"],
     )
     assert redis_client.xlen(STREAM) == 2
@@ -39,7 +39,7 @@ def test_promote_routes_to_multiple_streams(redis_client):
     delayed.promote(
         redis_client,
         ZSET,
-        [("s:high", "a"), ("s:low", "b")],
+        [("s:high", {"job_id": "a"}), ("s:low", {"job_id": "b"})],
         ["a", "b"],
     )
     assert redis_client.xlen("s:high") == 1

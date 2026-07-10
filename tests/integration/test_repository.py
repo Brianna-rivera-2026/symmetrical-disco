@@ -201,7 +201,7 @@ def test_list_filters_by_priority(db_session):
     assert highs[0].priority is JobPriority.high
 
 
-def test_get_priorities_batched(db_session):
+def test_get_promotion_info_batched(db_session):
     from app.schemas.enums import JobPriority
 
     a = repo.create_job(
@@ -212,12 +212,15 @@ def test_get_priorities_batched(db_session):
     )
     b = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
 
-    result = repo.get_priorities(db_session, [a.id, b.id])
-    assert result == {a.id: JobPriority.high, b.id: JobPriority.normal}
+    result = repo.get_promotion_info(db_session, [a.id, b.id])
+    assert result == {
+        a.id: (JobPriority.high, None),
+        b.id: (JobPriority.normal, None),
+    }
 
 
-def test_get_priorities_empty_returns_empty(db_session):
-    assert repo.get_priorities(db_session, []) == {}
+def test_get_promotion_info_empty_returns_empty(db_session):
+    assert repo.get_promotion_info(db_session, []) == {}
 
 
 def test_create_job_defaults_attempts(db_session):

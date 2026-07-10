@@ -203,13 +203,15 @@ def list_unsynced(session: Session, *, older_than: datetime, limit: int) -> list
     return list(session.execute(stmt).scalars())
 
 
-def get_priorities(session: Session, job_ids: list[UUID]) -> dict[UUID, JobPriority]:
+def get_promotion_info(
+    session: Session, job_ids: list[UUID]
+) -> dict[UUID, tuple[JobPriority, dict | None]]:
     if not job_ids:
         return {}
     rows = session.execute(
-        select(Job.id, Job.priority).where(Job.id.in_(job_ids))
+        select(Job.id, Job.priority, Job.trace_context).where(Job.id.in_(job_ids))
     ).all()
-    return {row.id: row.priority for row in rows}
+    return {row.id: (row.priority, row.trace_context) for row in rows}
 
 
 def init_progress(session: Session, job_id: UUID) -> bool:

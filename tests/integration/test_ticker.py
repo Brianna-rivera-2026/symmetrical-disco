@@ -1,5 +1,6 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+import sqlalchemy as sa
 from sqlalchemy import text
 
 from app import repository as repo
@@ -246,3 +247,63 @@ def test_promote_due_routes_by_priority(db_session, redis_client, test_settings)
     assert redis_client.xlen(test_settings.stream_normal) == 0
     db_session.refresh(high)
     assert high.status is JobStatus.pending
+
+
+def test_promote_reinjects_stored_trace_context(db_session, redis_client, test_settings):
+    stored = {"traceparent": f"00-{'ab' * 16}-{'cd' * 8}-01"}
+    past = datetime.now(timezone.utc) - timedelta(seconds=5)
+    job = repo.create_job(
+        db_session,
+        JobType.email,
+        {"to": "a@b.com", "subject": "Hi"},
+        status=JobStatus.scheduled,
+        scheduled_at=past,
+        trace_context=stored,
+    )
+    delayed.schedule(redis_client, test_settings.delayed_zset, str(job.id), past.timestamp())
+
+    promote_due(db_session, redis_client, test_settings)
+
+    entries = redis_client.xrange(test_settings.stream_normal)
+    assert len(entries) == 1
+    fields = entries[0][1]
+    assert fields["job_id"] == str(job.id)
+    assert "ab" * 16 in fields["traceparent"]  # original trace id restored
+
+
+def test_promote_without_stored_context_still_enqueues(
+    db_session, redis_client, test_settings
+):
+    past = datetime.now(timezone.utc) - timedelta(seconds=5)
+    job = repo.create_job(
+        db_session,
+        JobType.email,
+        {"to": "a@b.com", "subject": "Hi"},
+        status=JobStatus.scheduled,
+        scheduled_at=past,
+    )
+    delayed.schedule(redis_client, test_settings.delayed_zset, str(job.id), past.timestamp())
+    promote_due(db_session, redis_client, test_settings)
+    entries = redis_client.xrange(test_settings.stream_normal)
+    assert entries[0][1]["job_id"] == str(job.id)
+
+
+def test_reconcile_reinjects_stored_trace_context(
+    db_session, redis_client, test_settings
+):
+    stored = {"traceparent": f"00-{'12' * 16}-{'34' * 8}-01"}
+    job = repo.create_job(
+        db_session,
+        JobType.email,
+        {"to": "a@b.com", "subject": "Hi"},
+        trace_context=stored,
+    )
+    # pending + unsynced + old enough → reconcile re-enqueues it
+    db_session.execute(
+        sa.text("UPDATE jobs SET created_at = now() - interval '1 hour' WHERE id = :id"),
+        {"id": str(job.id)},
+    )
+    db_session.commit()
+    reconcile_orphans(db_session, redis_client, test_settings)
+    entries = redis_client.xrange(test_settings.stream_normal)
+    assert "12" * 16 in entries[0][1]["traceparent"]

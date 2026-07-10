@@ -25,6 +25,7 @@ def schedule_retry_or_fail(
     settings: Settings,
     job: Job,
     error: dict,
+    carrier: dict | None = None,
 ) -> bool:
     """Retry with backoff, or permanently fail at max_attempts. Returns True iff
     this actor won the guarded transition. Does not XACK."""
@@ -41,7 +42,12 @@ def schedule_retry_or_fail(
     if delay <= 0:
         won = repo.retry_to_pending(session, job.id)
         if won:
-            enqueue(client, settings.stream_for_priority(job.priority), str(job.id))
+            enqueue(
+                client,
+                settings.stream_for_priority(job.priority),
+                str(job.id),
+                carrier=carrier,
+            )
             repo.mark_synced(session, job.id)
         log.info(
             "retry.immediate", extra={"job_id": str(job.id), "attempts": n, "won": won}

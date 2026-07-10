@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import redis
+from opentelemetry import trace
 from sqlalchemy.orm import Session
 
 from app import repository as repo
@@ -14,11 +15,13 @@ from app.core.db import make_engine, make_session_factory
 from app.core.redis import create_redis_client
 from app.queue import delayed
 from app.queue.consumer import REAPER_NAME, ensure_group
-from app.queue.producer import enqueue
+from app.queue.producer import enqueue, message_fields
 from app.retry import schedule_retry_or_fail
 from app.schemas.enums import JobStatus
 
 log = logging.getLogger("app.ticker")
+
+_tracer = trace.get_tracer("app.ticker")
 
 
 def promote_due(session: Session, client: redis.Redis, settings: Settings) -> int:
@@ -28,18 +31,23 @@ def promote_due(session: Session, client: redis.Redis, settings: Settings) -> in
     )
     if not ids:
         return 0
-    priorities = repo.get_priorities(session, [UUID(i) for i in ids])
-    routed: list[tuple[str, str]] = []
-    for i in ids:
-        prio = priorities.get(UUID(i))
-        if prio is None:
-            # No scheduled row (cancelled/deleted): drop it — do not enqueue —
-            # but it is still ZREM'd below so it can't re-accumulate.
-            continue
-        routed.append((settings.stream_for_priority(prio), i))
-    delayed.promote(client, settings.delayed_zset, routed, ids)
-    repo.promote_scheduled_to_pending(session, [UUID(i) for i in ids])
-    log.info("ticker.promoted", extra={"enqueued": len(routed), "pulled": len(ids)})
+    with _tracer.start_as_current_span(
+        "ticker.promote", attributes={"jobs.count": len(ids)}
+    ):
+        info = repo.get_promotion_info(session, [UUID(i) for i in ids])
+        routed: list[tuple[str, dict]] = []
+        for i in ids:
+            meta = info.get(UUID(i))
+            if meta is None:
+                # No row (cancelled/deleted): drop it — do not enqueue —
+                # but it is still ZREM'd below so it can't re-accumulate.
+                continue
+            priority, carrier = meta
+            stream = settings.stream_for_priority(priority)
+            routed.append((stream, message_fields(stream, i, carrier)))
+        delayed.promote(client, settings.delayed_zset, routed, ids)
+        repo.promote_scheduled_to_pending(session, [UUID(i) for i in ids])
+        log.info("ticker.promoted", extra={"enqueued": len(routed), "pulled": len(ids)})
     return len(ids)
 
 
@@ -52,28 +60,32 @@ def reconcile_orphans(session: Session, client: redis.Redis, settings: Settings)
         )
         if not rows:
             break
-        for job in rows:
-            if job.status is JobStatus.scheduled:
-                if job.scheduled_at is None:
-                    log.warning(
-                        "ticker.reconcile_skipped_null_scheduled_at",
-                        extra={"job_id": str(job.id)},
+        with _tracer.start_as_current_span(
+            "ticker.reconcile", attributes={"jobs.count": len(rows)}
+        ):
+            for job in rows:
+                if job.status is JobStatus.scheduled:
+                    if job.scheduled_at is None:
+                        log.warning(
+                            "ticker.reconcile_skipped_null_scheduled_at",
+                            extra={"job_id": str(job.id)},
+                        )
+                        continue
+                    delayed.schedule(
+                        client,
+                        settings.delayed_zset,
+                        str(job.id),
+                        job.scheduled_at.timestamp(),
                     )
-                    continue
-                delayed.schedule(
-                    client,
-                    settings.delayed_zset,
-                    str(job.id),
-                    job.scheduled_at.timestamp(),
-                )
-            else:
-                enqueue(
-                    client,
-                    settings.stream_for_priority(job.priority),
-                    str(job.id),
-                )
-            repo.mark_synced(session, job.id)
-            total += 1
+                else:
+                    enqueue(
+                        client,
+                        settings.stream_for_priority(job.priority),
+                        str(job.id),
+                        carrier=job.trace_context,
+                    )
+                repo.mark_synced(session, job.id)
+                total += 1
         if len(rows) < settings.reconcile_batch_size:
             break
     return total
@@ -91,6 +103,7 @@ def _reap_one(session, client, settings, stream, message_id, job_id) -> None:
                 settings,
                 job,
                 {"type": "WorkerLost", "message": "reclaimed by reaper"},
+                carrier=job.trace_context,
             )
         elif not job.is_synced_to_redis:
             # Worker won the guard then died before the Redis handoff → finish it
@@ -103,7 +116,12 @@ def _reap_one(session, client, settings, stream, message_id, job_id) -> None:
                     job.scheduled_at.timestamp(),
                 )
             else:
-                enqueue(client, settings.stream_for_priority(job.priority), str(job.id))
+                enqueue(
+                    client,
+                    settings.stream_for_priority(job.priority),
+                    str(job.id),
+                    carrier=job.trace_context,
+                )
             repo.mark_synced(session, job.id)
         # else: pending/scheduled + synced=True → fresh message already live
     # Always clear the reclaimed entry from the PEL.
@@ -129,16 +147,20 @@ def reap_stale(session: Session, client: redis.Redis, settings: Settings) -> int
                 count=settings.reaper_batch_size,
             )
             cursor, messages = resp[0], resp[1]
-            for message_id, fields in messages:
-                _reap_one(
-                    session,
-                    client,
-                    settings,
-                    stream,
-                    message_id,
-                    UUID(fields["job_id"]),
-                )
-                handled += 1
+            if messages:
+                with _tracer.start_as_current_span(
+                    "ticker.reap", attributes={"jobs.count": len(messages)}
+                ):
+                    for message_id, fields in messages:
+                        _reap_one(
+                            session,
+                            client,
+                            settings,
+                            stream,
+                            message_id,
+                            UUID(fields["job_id"]),
+                        )
+                        handled += 1
             if cursor == "0-0":
                 break
     if handled:
