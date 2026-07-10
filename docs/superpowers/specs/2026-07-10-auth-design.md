@@ -110,7 +110,7 @@
 
   ### Traces
 
-  - **API requests:** FastAPIInstrumentor already creates the server spans. `get_current_user` sets `enduser.id` (the user's name) on the current span for authenticated requests, so every job-route trace is attributable. 401s are already captured by the instrumentation's status-code handling; no extra span work.
+  - **API requests:** FastAPIInstrumentor already creates the server spans. `get_current_user` sets `enduser.id` (the user's id as a string — same value the worker spans use, so both sides join in the backend) on the current span for authenticated requests, so every job-route trace is attributable. 401s are already captured by the instrumentation's status-code handling; no extra span work.
   - **Worker job spans:** when a worker loads a job whose `user_id` is not NULL, it sets `enduser.id` on the existing consumer span alongside the current `job.*` attributes. This makes ownership attributable on the async side too — the trace backend can answer "all failed background jobs for user X", not just API-request queries.
   - **Worker ownerless drop:** reuses the existing consumer span — sets `job.outcome = "dropped_ownerless"` (the attribute the worker already records for other outcomes).
   - **Sync script:** configures telemetry like the other three entrypoints and wraps its run in a `users.sync` span with a `users.synced_count` attribute (count only, no names or keys on the span). Because it is a short-lived one-shot process, it must **force-flush the tracer/meter/logger providers before exiting** (`force_flush()` via the existing telemetry shutdown path); otherwise the batch processors' buffers are dropped at process exit and the sync run never reaches the backend.
