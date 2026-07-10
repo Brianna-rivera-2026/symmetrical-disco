@@ -1,11 +1,16 @@
 import time
 
 import pytest
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind, StatusCode
 
 from app import repository as repo
+from app.core.db import make_session_factory
 from app.jobs import handlers
+from app.queue.consumer import ensure_group, read_priority
+from app.queue.producer import enqueue
 from app.schemas.enums import JobPriority, JobStatus, JobType
-from app.worker.runner import process_job
+from app.worker.runner import handle_message, process_job
 
 # handlers.time is the real stdlib `time` module (not a wrapper), so patching
 # handlers.time.sleep patches time.sleep globally. Capture the genuine
@@ -147,3 +152,96 @@ def test_run_forever_drains_high_before_low(test_settings, redis_client, pg_engi
         == 0
     )
     assert redis_client.xlen(test_settings.stream_low) == 1
+
+
+def _read_one(redis_client, test_settings):
+    batch = read_priority(
+        redis_client,
+        test_settings.ordered_streams,
+        test_settings.consumer_group,
+        "test-consumer",
+        block_ms=100,
+    )
+    assert batch, "expected one message"
+    return batch[0]
+
+
+def test_consumer_span_joins_producer_trace(
+    db_session, redis_client, test_settings, pg_engine, span_exporter
+):
+    for stream in test_settings.ordered_streams:
+        ensure_group(redis_client, stream, test_settings.consumer_group)
+    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    tracer = trace.get_tracer("test")
+    with tracer.start_as_current_span("submit") as submit_span:
+        enqueue(redis_client, test_settings.stream_normal, str(job.id))
+    stream, message_id, fields = _read_one(redis_client, test_settings)
+
+    outcome = handle_message(
+        make_session_factory(pg_engine),
+        redis_client,
+        test_settings,
+        stream,
+        message_id,
+        fields,
+    )
+
+    assert outcome.label == "completed"
+    consumer = next(
+        s for s in span_exporter.get_finished_spans() if s.name == "process job"
+    )
+    expected_trace = format(submit_span.get_span_context().trace_id, "032x")
+    assert format(consumer.context.trace_id, "032x") == expected_trace
+    assert consumer.kind is SpanKind.CONSUMER
+    assert consumer.attributes["job.outcome"] == "completed"
+    assert consumer.attributes["job.type"] == "email"
+    assert consumer.attributes["job.attempt"] == 1
+    # message acked: no pending entries left for the group
+    pending = redis_client.xpending(stream, test_settings.consumer_group)
+    assert pending["pending"] == 0
+
+
+def test_consumer_span_without_traceparent_starts_new_trace(
+    db_session, redis_client, test_settings, pg_engine, span_exporter
+):
+    for stream in test_settings.ordered_streams:
+        ensure_group(redis_client, stream, test_settings.consumer_group)
+    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    redis_client.xadd(
+        test_settings.stream_normal, {"job_id": str(job.id)}
+    )  # legacy shape
+    stream, message_id, fields = _read_one(redis_client, test_settings)
+    outcome = handle_message(
+        make_session_factory(pg_engine),
+        redis_client,
+        test_settings,
+        stream,
+        message_id,
+        fields,
+    )
+    assert outcome.label == "completed"
+
+
+def test_consumer_span_records_handler_error(
+    db_session, redis_client, test_settings, pg_engine, span_exporter, monkeypatch
+):
+    monkeypatch.setattr(handlers.random, "random", lambda: 0.05)  # force webhook fail
+    for stream in test_settings.ordered_streams:
+        ensure_group(redis_client, stream, test_settings.consumer_group)
+    job = repo.create_job(db_session, JobType.webhook, {"url": "https://x.test"})
+    enqueue(redis_client, test_settings.stream_normal, str(job.id))
+    stream, message_id, fields = _read_one(redis_client, test_settings)
+    handle_message(
+        make_session_factory(pg_engine),
+        redis_client,
+        test_settings,
+        stream,
+        message_id,
+        fields,
+    )
+    consumer = next(
+        s for s in span_exporter.get_finished_spans() if s.name == "process job"
+    )
+    assert consumer.attributes["job.outcome"] == "retried"
+    assert consumer.status.status_code is StatusCode.ERROR
+    assert consumer.events  # exception recorded

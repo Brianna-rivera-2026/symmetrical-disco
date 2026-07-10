@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from uuid import UUID
 
 import redis
+from opentelemetry import trace
+from opentelemetry.propagate import extract
+from opentelemetry.trace import SpanKind, Status, StatusCode
 from sqlalchemy.orm import Session
 
 from app import repository as repo
@@ -22,6 +25,7 @@ from app.worker.context import PgJobContext
 from app.worker.timeout import HandlerTimeout, run_with_timeout
 
 log = logging.getLogger("app.worker")
+_tracer = trace.get_tracer("app.worker")
 
 
 @dataclass
@@ -43,6 +47,10 @@ def process_job(
         return Outcome(ack=True, recycle=False, label="skipped")
 
     job = repo.get_job(session, job_id)
+    span = trace.get_current_span()
+    span.set_attribute("job.type", job.type.value)
+    span.set_attribute("job.priority", job.priority.value)
+    span.set_attribute("job.attempt", job.attempts + 1)
     is_batch = job.type == JobType.batch
     if is_batch:
         repo.init_progress(session, job.id)
@@ -56,7 +64,9 @@ def process_job(
         won = repo.cancel_job(session, job.id, cancelled.summary)
         log.info("job.cancelled", extra={"won": won})
         return Outcome(ack=won, recycle=False, label="cancelled")
-    except HandlerTimeout:
+    except HandlerTimeout as timeout_exc:
+        span.record_exception(timeout_exc)
+        span.set_status(Status(StatusCode.ERROR, "HandlerTimeout"))
         won = schedule_retry_or_fail(
             session,
             client,
@@ -70,6 +80,8 @@ def process_job(
         log.warning("job.timeout", extra={"won": won})
         return Outcome(ack=won, recycle=True, label="timeout")
     except Exception as exc:  # noqa: BLE001 — any handler/validation error is retryable
+        span.record_exception(exc)
+        span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
         won = schedule_retry_or_fail(
             session,
             client,
@@ -78,7 +90,8 @@ def process_job(
             {"type": type(exc).__name__, "message": str(exc)},
         )
         log.info(
-            "job.retry_scheduled", extra={"error_type": type(exc).__name__, "won": won}
+            "job.retry_scheduled",
+            extra={"error_type": type(exc).__name__, "won": won},
         )
         return Outcome(ack=won, recycle=False, label="retried")
 
@@ -88,6 +101,40 @@ def process_job(
         return Outcome(ack=False, recycle=False, label="lost")
     log.info("job.completed")
     return Outcome(ack=True, recycle=False, label="completed")
+
+
+def handle_message(
+    session_factory: Callable[[], Session],
+    client: redis.Redis,
+    settings: Settings,
+    stream: str,
+    message_id: str,
+    fields: dict,
+) -> Outcome:
+    """Process one delivered message inside a CONSUMER span that continues
+    the trace carried in the message fields (or starts a new one)."""
+    job_id = UUID(fields["job_id"])
+    parent = extract(fields)  # tolerates absent/malformed traceparent
+    with bind_log_context(job_id=str(job_id), message_id=message_id, stream=stream):
+        with _tracer.start_as_current_span(
+            "process job",
+            context=parent,
+            kind=SpanKind.CONSUMER,
+            attributes={
+                "messaging.system": "redis",
+                "messaging.destination.name": stream,
+                "job.id": str(job_id),
+            },
+        ) as span:
+            log.info("job.received")
+            with session_factory() as session:
+                outcome = process_job(
+                    session, client, settings, job_id, session_factory
+                )
+            span.set_attribute("job.outcome", outcome.label)
+        if outcome.ack:
+            ack(client, stream, settings.consumer_group, message_id)
+        return outcome
 
 
 def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -> int:
@@ -125,23 +172,15 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
             settings.block_ms,
         )
         for stream, message_id, fields in batch:
-            job_id = UUID(fields["job_id"])
-            with bind_log_context(
-                job_id=str(job_id), message_id=message_id, stream=stream
-            ):
-                log.info("job.received")
-                with session_factory() as session:
-                    outcome = process_job(
-                        session, client, settings, job_id, session_factory
-                    )
-                if outcome.ack:
-                    ack(client, stream, settings.consumer_group, message_id)
-                if outcome.recycle:
-                    timeouts += 1
-                    if timeouts >= settings.max_handler_timeouts_before_recycle:
-                        log.warning("worker.recycling", extra={"timeouts": timeouts})
-                        exit_code = 1
-                        break
+            outcome = handle_message(
+                session_factory, client, settings, stream, message_id, fields
+            )
+            if outcome.recycle:
+                timeouts += 1
+                if timeouts >= settings.max_handler_timeouts_before_recycle:
+                    log.warning("worker.recycling", extra={"timeouts": timeouts})
+                    exit_code = 1
+                    break
         if exit_code:
             break
 
