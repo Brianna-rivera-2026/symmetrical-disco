@@ -1,11 +1,15 @@
+from __future__ import annotations
+
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+    pass
 
 
 class JobContext(Protocol):
