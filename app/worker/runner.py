@@ -163,8 +163,13 @@ def handle_message(
     the trace carried in the message fields (or starts a new one)."""
     job_id = UUID(fields["job_id"])
     sent_ms = int(message_id.split("-")[0])
+    # Label by priority (e.g. "normal"), not the raw stream key
+    # (e.g. "jobs:stream:normal"), so this joins with queue.depth's
+    # {"stream": priority.value} on the same dashboard.
+    priority_by_stream = {s: p.value for p, s in settings.priority_streams}
     app_metrics.job_queue_wait.record(
-        max(0.0, time.time() - sent_ms / 1000), {"stream": stream}
+        max(0.0, time.time() - sent_ms / 1000),
+        {"stream": priority_by_stream.get(stream, stream)},
     )
     parent = extract(fields)  # tolerates absent/malformed traceparent
     with bind_log_context(job_id=str(job_id), message_id=message_id, stream=stream):
