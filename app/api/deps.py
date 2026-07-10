@@ -1,11 +1,11 @@
 import logging
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 
 import redis
 from fastapi import Depends, HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
 from opentelemetry import trace
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import repository as repo
 from app.core import metrics as app_metrics
@@ -17,9 +17,9 @@ log = logging.getLogger("app.api")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
-def get_db(request: Request) -> Iterator[Session]:
+async def get_db(request: Request) -> AsyncIterator[AsyncSession]:
     factory = request.app.state.session_factory
-    with factory() as session:
+    async with factory() as session:
         yield session
 
 
@@ -30,10 +30,10 @@ def get_redis(request: Request) -> redis.Redis:
 async def get_current_user(
     request: Request,
     api_key: str | None = Security(api_key_header),
-    session: Session = Depends(get_db),
+    session: AsyncSession = Depends(get_db),
 ) -> AsyncIterator[AuthedUser]:
     """Async yield-dependency: runs in the request's task context, so the
-    bound log fields propagate into the sync endpoint's threadpool copy."""
+    bound log fields propagate to native async endpoints."""
     if not api_key:
         app_metrics.auth_validations.add(1, {"result": "missing_key", "source": "n/a"})
         log.warning("auth.missing_key")
@@ -45,7 +45,7 @@ async def get_current_user(
     source = "cache"
     if user is None:
         source = "db"
-        row = repo.get_user_by_key_hash(session, key_hash)
+        row = await repo.get_user_by_key_hash(session, key_hash)
         if row is None:
             app_metrics.auth_validations.add(
                 1, {"result": "unknown_key", "source": "db"}

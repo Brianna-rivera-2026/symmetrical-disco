@@ -35,7 +35,7 @@ def test_ready_503_when_redis_down(client):
     assert body["checks"]["postgres"] == "ok"
 
 
-def test_submit_creates_job_and_enqueues(client):
+async def test_submit_creates_job_and_enqueues(client, redis_client):
     resp = client.post(
         "/jobs", json={"type": "email", "payload": {"to": "a@b.com", "subject": "Hi"}}
     )
@@ -51,9 +51,11 @@ def test_submit_creates_job_and_enqueues(client):
 
     # Default priority is normal, echoed and routed to the normal stream.
     assert body["priority"] == "normal"
-    redis_client = client.app.state.redis
     settings = client.app.state.settings
-    assert redis_client.xlen(settings.stream_normal) == 1
+    # A dedicated connection (rather than `client.app.state.redis`, which is
+    # bound to TestClient's own event-loop thread) so this awaits cleanly
+    # from the test's loop while checking the same Redis server.
+    assert await redis_client.xlen(settings.stream_normal) == 1
 
 
 def test_submit_rejects_bad_payload(client):
@@ -86,10 +88,10 @@ def test_list_filters_by_type(client):
     assert items[0]["type"] == "email"
 
 
-def test_submit_scheduled_job_parks_in_zset(client):
+async def test_submit_scheduled_job_parks_in_zset(client, redis_client):
     from datetime import datetime, timedelta, timezone
 
-    client.app.state.redis.flushdb()
+    await redis_client.flushdb()
     when = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
     resp = client.post(
         "/jobs",
@@ -104,16 +106,15 @@ def test_submit_scheduled_job_parks_in_zset(client):
     assert body["status"] == "scheduled"
     assert body["scheduled_at"] is not None
 
-    redis_client = client.app.state.redis
     settings = client.app.state.settings
-    assert redis_client.zcard(settings.delayed_zset) == 1
-    assert redis_client.xlen(settings.stream_normal) == 0
+    assert await redis_client.zcard(settings.delayed_zset) == 1
+    assert await redis_client.xlen(settings.stream_normal) == 0
 
 
-def test_submit_past_scheduled_at_runs_immediately(client):
+async def test_submit_past_scheduled_at_runs_immediately(client, redis_client):
     from datetime import datetime, timedelta, timezone
 
-    client.app.state.redis.flushdb()
+    await redis_client.flushdb()
     when = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     resp = client.post(
         "/jobs",
@@ -127,14 +128,13 @@ def test_submit_past_scheduled_at_runs_immediately(client):
     body = resp.json()
     assert body["status"] == "pending"
 
-    redis_client = client.app.state.redis
     settings = client.app.state.settings
-    assert redis_client.xlen(settings.stream_normal) == 1
-    assert redis_client.zcard(settings.delayed_zset) == 0
+    assert await redis_client.xlen(settings.stream_normal) == 1
+    assert await redis_client.zcard(settings.delayed_zset) == 0
 
 
-def test_submit_high_priority_routes_to_high_stream(client):
-    client.app.state.redis.flushdb()
+async def test_submit_high_priority_routes_to_high_stream(client, redis_client):
+    await redis_client.flushdb()
     resp = client.post(
         "/jobs",
         json={
@@ -146,10 +146,9 @@ def test_submit_high_priority_routes_to_high_stream(client):
     assert resp.status_code == 202
     assert resp.json()["priority"] == "high"
 
-    redis_client = client.app.state.redis
     settings = client.app.state.settings
-    assert redis_client.xlen(settings.stream_high) == 1
-    assert redis_client.xlen(settings.stream_normal) == 0
+    assert await redis_client.xlen(settings.stream_high) == 1
+    assert await redis_client.xlen(settings.stream_normal) == 0
 
 
 def test_list_filters_by_priority(client):
@@ -181,15 +180,15 @@ def test_job_out_exposes_attempts(client):
     assert got["max_attempts"] == 4
 
 
-def test_retry_failed_job_reenqueues(client, db_session, default_user_id):
+async def test_retry_failed_job_reenqueues(client, db_session, default_user_id):
     from app import repository as repo
     from app.schemas.enums import JobType
 
-    job = repo.create_job(
+    job = await repo.create_job(
         db_session, JobType.webhook, {"url": "https://x.test"}, user_id=default_user_id
     )
-    repo.claim_job(db_session, job.id)
-    repo.fail_job(db_session, job.id, {"type": "E", "message": "boom"})
+    await repo.claim_job(db_session, job.id)
+    await repo.fail_job(db_session, job.id, {"type": "E", "message": "boom"})
 
     resp = client.post(f"/jobs/{job.id}/retry")
     assert resp.status_code == 200
