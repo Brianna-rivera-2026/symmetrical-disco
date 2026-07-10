@@ -24,6 +24,7 @@ from app.schemas.api import (
     JobList,
     JobOut,
     JobSubmission,
+    LivenessResponse,
     StatsResponse,
 )
 from app.schemas.enums import JobPriority, JobStatus, JobType
@@ -33,8 +34,14 @@ router = APIRouter()
 log = logging.getLogger("app.api")
 
 
-@router.get("/health", response_model=HealthResponse)
-def health(
+@router.get("/health", response_model=LivenessResponse)
+def health() -> LivenessResponse:
+    """Liveness: the process is serving requests."""
+    return LivenessResponse(status="ok")
+
+
+@router.get("/ready", response_model=HealthResponse)
+def ready(
     session: Session = Depends(get_db),
     client: redis.Redis = Depends(get_redis),
 ):

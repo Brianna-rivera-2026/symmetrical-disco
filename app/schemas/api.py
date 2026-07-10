@@ -57,6 +57,10 @@ class JobList(BaseModel):
     next_cursor: str | None
 
 
+class LivenessResponse(BaseModel):
+    status: str
+
+
 class HealthChecks(BaseModel):
     postgres: str
     redis: str

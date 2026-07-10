@@ -1,5 +1,20 @@
-def test_health_ok_when_backends_up(client):
-    resp = client.get("/health")
+def test_health_is_pure_liveness(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_health_stays_200_when_redis_down(client):
+    from app.core.redis import create_redis_client
+
+    # Point the app at a closed port -> PING raises a RedisError.
+    client.app.state.redis = create_redis_client("redis://127.0.0.1:6390/0")
+    response = client.get("/health")
+    assert response.status_code == 200
+
+
+def test_ready_ok_when_backends_up(client):
+    resp = client.get("/ready")
     assert resp.status_code == 200
     assert resp.json() == {
         "status": "ok",
@@ -7,12 +22,12 @@ def test_health_ok_when_backends_up(client):
     }
 
 
-def test_health_503_when_redis_down(client):
+def test_ready_503_when_redis_down(client):
     from app.core.redis import create_redis_client
 
     # Point the app at a closed port -> PING raises a RedisError.
     client.app.state.redis = create_redis_client("redis://127.0.0.1:6390/0")
-    resp = client.get("/health")
+    resp = client.get("/ready")
     assert resp.status_code == 503
     body = resp.json()
     assert body["status"] == "unavailable"
