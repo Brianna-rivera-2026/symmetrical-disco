@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app import repository as repo
-from app.api.deps import get_db, get_redis
+from app.api.deps import get_current_user, get_db, get_redis
 from app.core import metrics as app_metrics
 from app.core.telemetry import current_trace_carrier
 from app.idempotency import canonical_hash
@@ -29,22 +29,10 @@ from app.schemas.api import (
 )
 from app.schemas.enums import JobPriority, JobStatus, JobType
 from app.schemas.payloads import validate_payload
+from app.users.keys import AuthedUser
 
 router = APIRouter()
 log = logging.getLogger("app.api")
-
-
-def _get_by_idempotency_key_unscoped(session, key):
-    """Temporary shim: routes have no authenticated user until Task 5 adds
-    the auth dependency, so we can't yet supply the now-required user_id to
-    repo.get_by_idempotency_key. Task 5 deletes this."""
-    from sqlalchemy import select
-
-    from app.models.job import Job
-
-    return session.execute(
-        select(Job).where(Job.idempotency_key == key)
-    ).scalar_one_or_none()
 
 
 @router.get("/health", response_model=LivenessResponse)
@@ -82,7 +70,7 @@ def stats(
         raise HTTPException(status_code=503, detail="stats unavailable") from exc
 
 
-def _create_and_handoff(session, client, settings, submission, key, req_hash):
+def _create_and_handoff(session, client, settings, submission, key, req_hash, user_id):
     scheduled_at = submission.scheduled_at
     if scheduled_at is not None and scheduled_at > datetime.now(timezone.utc):
         job = repo.create_job(
@@ -96,6 +84,7 @@ def _create_and_handoff(session, client, settings, submission, key, req_hash):
             idempotency_key=key,
             idempotency_hash=req_hash,
             trace_context=current_trace_carrier(),
+            user_id=user_id,
         )
         schedule(client, settings.delayed_zset, str(job.id), scheduled_at.timestamp())
     else:
@@ -108,6 +97,7 @@ def _create_and_handoff(session, client, settings, submission, key, req_hash):
             idempotency_key=key,
             idempotency_hash=req_hash,
             trace_context=current_trace_carrier(),
+            user_id=user_id,
         )
         enqueue(client, settings.stream_for_priority(submission.priority), str(job.id))
     repo.mark_synced(session, job.id)
@@ -149,6 +139,7 @@ def submit_job(
     response: Response,
     session: Session = Depends(get_db),
     client: redis.Redis = Depends(get_redis),
+    user: AuthedUser = Depends(get_current_user),
 ) -> JobAccepted:
     settings = request.app.state.settings
     try:
@@ -158,25 +149,33 @@ def submit_job(
 
     key = submission.idempotency_key
     if key is None:
-        job = _create_and_handoff(session, client, settings, submission, None, None)
+        job = _create_and_handoff(
+            session, client, settings, submission, None, None, user.id
+        )
         return _accepted(job)
 
     req_hash = canonical_hash(submission.type, submission.payload)
-    existing = _get_by_idempotency_key_unscoped(session, key)
+    existing = repo.get_by_idempotency_key(session, key, user.id)
     if existing is not None:
         return _replay_or_conflict(existing, req_hash, response)
     try:
-        job = _create_and_handoff(session, client, settings, submission, key, req_hash)
+        job = _create_and_handoff(
+            session, client, settings, submission, key, req_hash, user.id
+        )
     except IntegrityError:
         session.rollback()
-        existing = _get_by_idempotency_key_unscoped(session, key)
+        existing = repo.get_by_idempotency_key(session, key, user.id)
         return _replay_or_conflict(existing, req_hash, response)
     return _accepted(job)
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut)
-def get_job(job_id: UUID, session: Session = Depends(get_db)) -> JobOut:
-    job = repo.get_job(session, job_id)
+def get_job(
+    job_id: UUID,
+    session: Session = Depends(get_db),
+    user: AuthedUser = Depends(get_current_user),
+) -> JobOut:
+    job = repo.get_job(session, job_id, user_id=user.id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     return JobOut.model_validate(job)
@@ -188,8 +187,9 @@ def retry_job(
     request: Request,
     session: Session = Depends(get_db),
     client: redis.Redis = Depends(get_redis),
+    user: AuthedUser = Depends(get_current_user),
 ) -> JobOut:
-    job = repo.get_job(session, job_id)
+    job = repo.get_job(session, job_id, user_id=user.id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     if not repo.reset_failed_to_pending(session, job_id):
@@ -210,8 +210,11 @@ def cancel_job_route(
     response: Response,
     session: Session = Depends(get_db),
     client: redis.Redis = Depends(get_redis),
+    user: AuthedUser = Depends(get_current_user),
 ) -> JobOut:
     settings = request.app.state.settings
+    if repo.get_job(session, job_id, user_id=user.id) is None:
+        raise HTTPException(status_code=404, detail="job not found")
     for _ in range(3):  # bounded re-resolve for the legal processing<->pending flap
         if repo.cancel_pending_or_scheduled(session, job_id):
             client.zrem(settings.delayed_zset, str(job_id))  # harmless no-op if absent
@@ -240,6 +243,7 @@ def list_jobs(
     priority: JobPriority | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     cursor: str | None = Query(default=None),
+    user: AuthedUser = Depends(get_current_user),
 ) -> JobList:
     try:
         jobs, next_cursor = repo.list_jobs(
@@ -247,6 +251,7 @@ def list_jobs(
             status=status,
             job_type=type,
             priority=priority,
+            user_id=user.id,
             limit=limit,
             cursor=cursor,
         )

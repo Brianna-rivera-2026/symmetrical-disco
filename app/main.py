@@ -11,6 +11,7 @@ from app.core.logging import configure_logging
 from app.core.redis import create_redis_client
 from app.core.telemetry import configure_telemetry, shutdown_telemetry
 from app.queue.consumer import ensure_group
+from app.users.keys import KeyCache
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -35,6 +36,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.session_factory = session_factory
     app.state.redis = redis_client
+    app.state.key_cache = KeyCache(ttl_s=settings.auth_cache_ttl_s)
     app.include_router(router)
     if settings.otel_enabled:
         FastAPIInstrumentor.instrument_app(app)

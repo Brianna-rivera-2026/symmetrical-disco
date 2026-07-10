@@ -38,7 +38,9 @@ def test_no_key_always_creates(client):
     assert r1.json()["id"] != r2.json()["id"]
 
 
-def test_race_path_different_payload_conflicts(client, db_session, monkeypatch):
+def test_race_path_different_payload_conflicts(
+    client, db_session, default_user_id, monkeypatch
+):
     # Pre-create the "winner" row with key "race".
     repo.create_job(
         db_session,
@@ -46,15 +48,16 @@ def test_race_path_different_payload_conflicts(client, db_session, monkeypatch):
         _EMAIL,
         idempotency_key="race",
         idempotency_hash=canonical_hash(JobType.email, _EMAIL),
+        user_id=default_user_id,
     )
     # Force the first lookup to miss so the route takes the create -> IntegrityError
     # -> rollback -> re-lookup branch (the concurrent-race path).
     real = repo.get_by_idempotency_key
     calls = {"n": 0}
 
-    def flaky(session, key):
+    def flaky(session, key, user_id):
         calls["n"] += 1
-        return None if calls["n"] == 1 else real(session, key)
+        return None if calls["n"] == 1 else real(session, key, user_id)
 
     monkeypatch.setattr(routes.repo, "get_by_idempotency_key", flaky)
     resp = client.post(

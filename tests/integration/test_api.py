@@ -181,11 +181,13 @@ def test_job_out_exposes_attempts(client):
     assert got["max_attempts"] == 4
 
 
-def test_retry_failed_job_reenqueues(client, db_session):
+def test_retry_failed_job_reenqueues(client, db_session, default_user_id):
     from app import repository as repo
     from app.schemas.enums import JobType
 
-    job = repo.create_job(db_session, JobType.webhook, {"url": "https://x.test"})
+    job = repo.create_job(
+        db_session, JobType.webhook, {"url": "https://x.test"}, user_id=default_user_id
+    )
     repo.claim_job(db_session, job.id)
     repo.fail_job(db_session, job.id, {"type": "E", "message": "boom"})
 
