@@ -74,7 +74,7 @@
 
   ## Workers: drop ownerless jobs
 
-  When a worker loads a job for execution and finds `user_id IS NULL`, it does not run the handler. It marks the job **failed** with a structured error (`{"reason": "ownerless job dropped"}`), acks the stream message, logs it with job context, and moves on. No retries.
+  When a worker loads a job for execution and finds `user_id IS NULL`, it does not run the handler. It marks the job **failed** with a structured error (`{"reason": "ownerless job dropped"}`), acks the stream message, logs it with job context, and moves on. No retries. The log event is **`warning`, not `error`** — the guard working as designed is an expected, non-exceptional outcome (draining legacy jobs, deleted users), and it shouldn't page anyone by itself; detection is the metric's job.
 
   This makes ownership a hard end-to-end invariant: unowned jobs are invisible through the API *and* inert in the pipeline. It covers legacy pre-auth jobs still sitting in the queue, and — combined with the FK's `ON DELETE SET NULL` — gives user deletion clean semantics: deleting a user orphans their queued jobs, which the workers then drop instead of executing on behalf of no one.
 
@@ -95,9 +95,9 @@
 
   **Behavior:**
 
-  - For each entry, compute the SHA-256 hash of the raw key and upsert by name: `INSERT ... ON CONFLICT (name) DO UPDATE SET key_hash = EXCLUDED.key_hash`.
+  - Read and parse the whole file first; then, **inside a single database transaction**, upsert every entry by name: `INSERT ... ON CONFLICT (name) DO UPDATE SET key_hash = EXCLUDED.key_hash`. All-or-nothing: a failure partway through rolls back, so the users table is never left in a partial state — either the previous generation of keys or the new one, never a mix.
   - **Upsert-only** — users absent from the file are left untouched. Revocation is a manual row delete (or rotate the key in the secret so the old one stops matching).
-  - Idempotent and safe under concurrency: multiple replicas racing through sync converge on the same rows via the upsert.
+  - Idempotent and safe under concurrency: multiple replicas racing through sync converge on the same rows via the upserts, and the single transaction means each replica applies the full set atomically.
   - Exits non-zero on a missing/unreadable file, malformed JSON, or DB failure, which blocks API startup — a pod that can't provision its users doesn't serve traffic.
   - Rotation = change the key in the secret and restart; `DO UPDATE` swaps the hash. If the database is lost and recreated, the next restart repopulates all users automatically.
   - Logs each synced user name (never the key or hash) via structlog.
@@ -120,7 +120,7 @@
   | Instrument | Type | Attributes | Meaning |
   |---|---|---|---|
   | `auth.validations` | counter | `result` (ok \| missing_key \| unknown_key), `source` (cache \| db \| n/a) | Every auth attempt; cache hit ratio and 401 rate fall out of the attributes |
-  | `jobs.dropped_ownerless` | counter | — | Worker guard firings; should be ~0 in steady state, so any sustained rate is alertable |
+  | `jobs.dropped_ownerless` | counter | — | Worker guard firings; ~0 in steady state. Alert on a **sustained rate** (e.g. nonzero over a multi-minute window), not on single spikes — a burst is expected when legacy jobs drain or a user is deleted with queued work |
 
   ### Logs
 
@@ -146,7 +146,7 @@
   - **Fixture update:** a seeded test user + key header applied to existing route tests so they pass with auth enabled.
   - **Key cache tests:** second request with the same key does not query the database; after the user row is deleted, the key stops working once the TTL expires; unknown keys are never served from cache.
   - **Worker guard test:** a queued job with `user_id IS NULL` is marked failed with the "ownerless job dropped" error, acked, and its handler never runs.
-  - **Sync script tests:** fresh insert, re-run with a changed key updates the hash (rotation), re-run with same input is a no-op, users not in the input are untouched, missing or malformed secret file exits non-zero. Tests point `api_user_keys_file` at a tmp-path file.
+  - **Sync script tests:** fresh insert, re-run with a changed key updates the hash (rotation), re-run with same input is a no-op, users not in the input are untouched, missing or malformed secret file exits non-zero, and a failure partway through the batch leaves no rows from that run (transaction rolls back). Tests point `api_user_keys_file` at a tmp-path file.
   - **Integration (testcontainers):** one end-to-end test — run the sync entry point with two users, submit a job as one, fetch it with the right key (200) and the other user's key (404).
 
   ## Out of scope
