@@ -10,7 +10,7 @@ from app.jobs import handlers
 from app.queue.consumer import ensure_group, read_priority
 from app.queue.producer import enqueue
 from app.schemas.enums import JobPriority, JobStatus, JobType
-from app.worker.runner import handle_message, process_job
+from app.worker.runner import cpu_utilization_observations, handle_message, process_job
 
 # handlers.time is the real stdlib `time` module (not a wrapper), so patching
 # handlers.time.sleep patches time.sleep globally. Capture the genuine
@@ -245,3 +245,10 @@ def test_consumer_span_records_handler_error(
     assert consumer.attributes["job.outcome"] == "retried"
     assert consumer.status.status_code is StatusCode.ERROR
     assert consumer.events  # exception recorded
+
+
+def test_cpu_utilization_observations_returns_one_point():
+    observations = cpu_utilization_observations()
+    assert len(observations) == 1
+    assert isinstance(observations[0].value, float)
+    assert observations[0].value >= 0.0

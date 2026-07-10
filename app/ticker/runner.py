@@ -6,7 +6,9 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import redis
-from opentelemetry import trace
+from opentelemetry import metrics, trace
+from opentelemetry.metrics import Observation
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app import repository as repo
@@ -14,6 +16,7 @@ from app.core import metrics as app_metrics
 from app.core.config import Settings
 from app.core.db import make_engine, make_session_factory
 from app.core.redis import create_redis_client
+from app.observability import zero_fill_status_counts
 from app.queue import delayed
 from app.queue.consumer import REAPER_NAME, ensure_group
 from app.queue.producer import enqueue, message_fields
@@ -173,6 +176,76 @@ def reap_stale(session: Session, client: redis.Redis, settings: Settings) -> int
     return handled
 
 
+def queue_depth_observations(
+    client: redis.Redis, settings: Settings
+) -> list[Observation]:
+    """Consumer-group lag per stream (same source as /stats). Errors yield no
+    observations — a metrics callback must never raise."""
+    out: list[Observation] = []
+    try:
+        for priority, stream in settings.priority_streams:
+            try:
+                groups = client.xinfo_groups(stream)
+            except redis.ResponseError:
+                continue  # stream/group not created yet
+            group = next(
+                (g for g in groups if g.get("name") == settings.consumer_group),
+                None,
+            )
+            if group is not None and group.get("lag") is not None:
+                out.append(
+                    Observation(int(group["lag"]), {"stream": priority.value})
+                )
+    except redis.RedisError:
+        return []
+    return out
+
+
+def queue_scheduled_observations(
+    client: redis.Redis, settings: Settings
+) -> list[Observation]:
+    try:
+        return [Observation(int(client.zcard(settings.delayed_zset)))]
+    except redis.RedisError:
+        return []
+
+
+def job_status_observations(
+    session_factory: Callable[[], Session], settings: Settings
+) -> list[Observation]:
+    """Postgres queue saturation: job counts by status, zero-filled so every
+    status is always reported. Errors yield no observations — a metrics
+    callback must never raise."""
+    try:
+        with session_factory() as session:
+            rows = repo.count_by_status(session)
+    except SQLAlchemyError:
+        return []
+    counts = zero_fill_status_counts(rows)
+    return [Observation(count, {"status": status}) for status, count in counts.items()]
+
+
+def register_ticker_gauges(
+    client: redis.Redis, session_factory: Callable[[], Session], settings: Settings
+) -> None:
+    meter = metrics.get_meter("app.ticker")
+    meter.create_observable_gauge(
+        "queue.depth",
+        callbacks=[lambda options: queue_depth_observations(client, settings)],
+        description="Consumer-group lag per priority stream",
+    )
+    meter.create_observable_gauge(
+        "queue.scheduled",
+        callbacks=[lambda options: queue_scheduled_observations(client, settings)],
+        description="Jobs waiting in the delayed zset",
+    )
+    meter.create_observable_gauge(
+        "jobs.saturation",
+        callbacks=[lambda options: job_status_observations(session_factory, settings)],
+        description="Job counts by status (Postgres queue saturation)",
+    )
+
+
 def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -> None:
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
@@ -181,6 +254,9 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
     # later (group id "$") don't miss jobs the ticker has already promoted.
     for stream in settings.ordered_streams:
         ensure_group(client, stream, settings.consumer_group)
+
+    if settings.otel_enabled:
+        register_ticker_gauges(client, session_factory, settings)
 
     shutting_down = {"flag": False}
 

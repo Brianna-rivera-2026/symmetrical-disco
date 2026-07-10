@@ -6,8 +6,16 @@ from sqlalchemy import text
 from app import repository as repo
 from app.core.db import make_session_factory
 from app.queue import delayed
+from app.queue.consumer import ensure_group
 from app.schemas.enums import JobStatus, JobType
-from app.ticker.runner import promote_due, reconcile_orphans, run_forever
+from app.ticker.runner import (
+    job_status_observations,
+    promote_due,
+    queue_depth_observations,
+    queue_scheduled_observations,
+    reconcile_orphans,
+    run_forever,
+)
 
 
 def test_promote_due_moves_mature_job(db_session, redis_client, test_settings):
@@ -307,3 +315,48 @@ def test_reconcile_reinjects_stored_trace_context(
     reconcile_orphans(db_session, redis_client, test_settings)
     entries = redis_client.xrange(test_settings.stream_normal)
     assert "12" * 16 in entries[0][1]["traceparent"]
+
+
+def test_queue_depth_observations(redis_client, test_settings):
+    for stream in test_settings.ordered_streams:
+        ensure_group(redis_client, stream, test_settings.consumer_group)
+    redis_client.xadd(test_settings.stream_high, {"job_id": "x"})
+    observations = queue_depth_observations(redis_client, test_settings)
+    by_stream = {o.attributes["stream"]: o.value for o in observations}
+    assert by_stream["high"] == 1
+    assert by_stream["normal"] == 0
+
+
+def test_queue_scheduled_observations(redis_client, test_settings):
+    redis_client.zadd(test_settings.delayed_zset, {"a": 1.0, "b": 2.0})
+    observations = queue_scheduled_observations(redis_client, test_settings)
+    assert observations[0].value == 2
+
+
+def test_observations_swallow_redis_errors(test_settings):
+    import redis as redis_lib
+
+    dead = redis_lib.Redis(host="127.0.0.1", port=1, socket_connect_timeout=0.2)
+    assert queue_depth_observations(dead, test_settings) == []
+    assert queue_scheduled_observations(dead, test_settings) == []
+
+
+def test_job_status_observations_counts_pending_and_processing(
+    db_session, test_settings, pg_engine
+):
+    repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    repo.claim_job(db_session, job.id)  # -> processing
+
+    observations = job_status_observations(make_session_factory(pg_engine), test_settings)
+    by_status = {o.attributes["status"]: o.value for o in observations}
+    assert by_status["pending"] == 1
+    assert by_status["processing"] == 1
+    assert by_status["completed"] == 0  # zero-filled, not just omitted
+
+
+def test_job_status_observations_swallow_db_errors(test_settings):
+    from app.core.db import make_engine
+
+    dead_factory = make_session_factory(make_engine("postgresql+psycopg://u:p@127.0.0.1:1/x"))
+    assert job_status_observations(dead_factory, test_settings) == []

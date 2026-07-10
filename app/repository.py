@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import select, tuple_, update
+from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.orm import Session
 
 from app.cursor import decode_cursor, encode_cursor
@@ -261,3 +261,9 @@ def get_by_idempotency_key(session: Session, key: str) -> Job | None:
     return session.execute(
         select(Job).where(Job.idempotency_key == key)
     ).scalar_one_or_none()
+
+
+def count_by_status(session: Session) -> list[tuple[JobStatus, int]]:
+    return session.execute(
+        select(Job.status, func.count()).group_by(Job.status)
+    ).all()
