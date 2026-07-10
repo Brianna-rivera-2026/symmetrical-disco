@@ -39,12 +39,20 @@ services:
       postgres:
         condition: service_healthy
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.116.1
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+
   api:
     build: .
     image: jobprocessor-app:${APP_TAG:-dev}
     environment:
       DATABASE_URL: postgresql+psycopg://jobs:jobs@postgres:5432/jobs
       REDIS_URL: redis://redis:6379/0
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     ports:
       - "8000:8000"
     stop_grace_period: 30s
@@ -70,6 +78,16 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://jobs:jobs@postgres:5432/jobs
       REDIS_URL: redis://redis:6379/0
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      HEALTH_PORT: "8001"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health').status==200 else 1)"]
+      interval: 15s
+      timeout: 12s
+      retries: 5
+      start_period: 10s
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -85,6 +103,16 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://jobs:jobs@postgres:5432/jobs
       REDIS_URL: redis://redis:6379/0
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      HEALTH_PORT: "8001"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health').status==200 else 1)"]
+      interval: 15s
+      timeout: 12s
+      retries: 5
+      start_period: 10s
     depends_on:
       migrate:
         condition: service_completed_successfully
