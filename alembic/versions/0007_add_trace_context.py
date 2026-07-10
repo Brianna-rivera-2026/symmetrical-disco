@@ -16,9 +16,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "jobs", sa.Column("trace_context", postgresql.JSONB(), nullable=True)
-    )
+    op.add_column("jobs", sa.Column("trace_context", postgresql.JSONB(), nullable=True))
 
 
 def downgrade() -> None:

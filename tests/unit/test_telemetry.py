@@ -53,9 +53,11 @@ def test_configure_telemetry_swallows_setup_errors(monkeypatch, caplog):
     def _boom(*args, **kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(telemetry_module, "Resource", type(
-        "BrokenResource", (), {"create": staticmethod(_boom)}
-    ))
+    monkeypatch.setattr(
+        telemetry_module,
+        "Resource",
+        type("BrokenResource", (), {"create": staticmethod(_boom)}),
+    )
     settings = _settings(otel_enabled=True)
     with caplog.at_level("WARNING"):
         configure_telemetry(settings, "test-service")  # must not raise

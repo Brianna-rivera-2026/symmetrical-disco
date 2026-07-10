@@ -12,7 +12,8 @@ def test_fields_carry_active_context(span_exporter):
     assert fields["job_id"] == "j1"
     assert trace_id in fields["traceparent"]
     producer_spans = [
-        s for s in span_exporter.get_finished_spans()
+        s
+        for s in span_exporter.get_finished_spans()
         if s.name == "send jobs:stream:high"
     ]
     assert len(producer_spans) == 1
@@ -28,6 +29,8 @@ def test_fields_from_stored_carrier_join_original_trace(span_exporter):
 
 
 def test_fields_with_malformed_carrier_do_not_raise(span_exporter):
-    fields = message_fields("jobs:stream:normal", "j3", carrier={"traceparent": "garbage"})
+    fields = message_fields(
+        "jobs:stream:normal", "j3", carrier={"traceparent": "garbage"}
+    )
     assert fields["job_id"] == "j3"
     assert "traceparent" in fields  # new root trace, not an error

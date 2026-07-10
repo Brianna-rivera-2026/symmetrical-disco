@@ -17,6 +17,7 @@ from app.core.config import Settings
 from app.core.db import make_engine, make_session_factory
 from app.core.healthcheck import Heartbeat, HealthServer, ticker_heartbeat_threshold_s
 from app.core.redis import create_redis_client
+from app.core.telemetry import configure_telemetry, shutdown_telemetry
 from app.observability import zero_fill_status_counts
 from app.queue import delayed
 from app.queue.consumer import REAPER_NAME, ensure_group
@@ -194,9 +195,7 @@ def queue_depth_observations(
                 None,
             )
             if group is not None and group.get("lag") is not None:
-                out.append(
-                    Observation(int(group["lag"]), {"stream": priority.value})
-                )
+                out.append(Observation(int(group["lag"]), {"stream": priority.value}))
     except redis.RedisError:
         return []
     return out
@@ -248,6 +247,7 @@ def register_ticker_gauges(
 
 
 def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -> None:
+    configure_telemetry(settings, "jobs-ticker")
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
     client = create_redis_client(settings.redis_url)
@@ -319,5 +319,6 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
     log.info("ticker.stopped")
     if health_server is not None:
         health_server.stop()
+    shutdown_telemetry()
     client.close()
     engine.dispose()

@@ -264,6 +264,4 @@ def get_by_idempotency_key(session: Session, key: str) -> Job | None:
 
 
 def count_by_status(session: Session) -> list[tuple[JobStatus, int]]:
-    return session.execute(
-        select(Job.status, func.count()).group_by(Job.status)
-    ).all()
+    return session.execute(select(Job.status, func.count()).group_by(Job.status)).all()

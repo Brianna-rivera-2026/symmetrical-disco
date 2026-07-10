@@ -20,6 +20,7 @@ from app.core.healthcheck import Heartbeat, HealthServer, worker_heartbeat_thres
 from app.core import metrics as app_metrics
 from app.core.logging import bind_log_context, bind_static_log_context
 from app.core.redis import create_redis_client
+from app.core.telemetry import configure_telemetry, shutdown_telemetry
 from app.jobs.handlers import JobCancelled
 from app.jobs.registry import run_handler
 from app.queue.consumer import CONSUMER_NAME, ack, ensure_group, read_priority
@@ -189,6 +190,7 @@ def handle_message(
 
 
 def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -> int:
+    configure_telemetry(settings, "jobs-worker", instance_id=CONSUMER_NAME)
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
     client = create_redis_client(settings.redis_url)
@@ -257,6 +259,7 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
     log.info("worker.stopped", extra={"exit_code": exit_code})
     if health_server is not None:
         health_server.stop()
+    shutdown_telemetry()
     client.close()
     engine.dispose()
     return exit_code

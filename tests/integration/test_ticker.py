@@ -257,7 +257,9 @@ def test_promote_due_routes_by_priority(db_session, redis_client, test_settings)
     assert high.status is JobStatus.pending
 
 
-def test_promote_reinjects_stored_trace_context(db_session, redis_client, test_settings):
+def test_promote_reinjects_stored_trace_context(
+    db_session, redis_client, test_settings
+):
     stored = {"traceparent": f"00-{'ab' * 16}-{'cd' * 8}-01"}
     past = datetime.now(timezone.utc) - timedelta(seconds=5)
     job = repo.create_job(
@@ -268,7 +270,9 @@ def test_promote_reinjects_stored_trace_context(db_session, redis_client, test_s
         scheduled_at=past,
         trace_context=stored,
     )
-    delayed.schedule(redis_client, test_settings.delayed_zset, str(job.id), past.timestamp())
+    delayed.schedule(
+        redis_client, test_settings.delayed_zset, str(job.id), past.timestamp()
+    )
 
     promote_due(db_session, redis_client, test_settings)
 
@@ -290,7 +294,9 @@ def test_promote_without_stored_context_still_enqueues(
         status=JobStatus.scheduled,
         scheduled_at=past,
     )
-    delayed.schedule(redis_client, test_settings.delayed_zset, str(job.id), past.timestamp())
+    delayed.schedule(
+        redis_client, test_settings.delayed_zset, str(job.id), past.timestamp()
+    )
     promote_due(db_session, redis_client, test_settings)
     entries = redis_client.xrange(test_settings.stream_normal)
     assert entries[0][1]["job_id"] == str(job.id)
@@ -308,7 +314,9 @@ def test_reconcile_reinjects_stored_trace_context(
     )
     # pending + unsynced + old enough → reconcile re-enqueues it
     db_session.execute(
-        sa.text("UPDATE jobs SET created_at = now() - interval '1 hour' WHERE id = :id"),
+        sa.text(
+            "UPDATE jobs SET created_at = now() - interval '1 hour' WHERE id = :id"
+        ),
         {"id": str(job.id)},
     )
     db_session.commit()
@@ -348,7 +356,9 @@ def test_job_status_observations_counts_pending_and_processing(
     job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
     repo.claim_job(db_session, job.id)  # -> processing
 
-    observations = job_status_observations(make_session_factory(pg_engine), test_settings)
+    observations = job_status_observations(
+        make_session_factory(pg_engine), test_settings
+    )
     by_status = {o.attributes["status"]: o.value for o in observations}
     assert by_status["pending"] == 1
     assert by_status["processing"] == 1
@@ -358,5 +368,7 @@ def test_job_status_observations_counts_pending_and_processing(
 def test_job_status_observations_swallow_db_errors(test_settings):
     from app.core.db import make_engine
 
-    dead_factory = make_session_factory(make_engine("postgresql+psycopg://u:p@127.0.0.1:1/x"))
+    dead_factory = make_session_factory(
+        make_engine("postgresql+psycopg://u:p@127.0.0.1:1/x")
+    )
     assert job_status_observations(dead_factory, test_settings) == []

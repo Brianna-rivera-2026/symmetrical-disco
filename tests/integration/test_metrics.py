@@ -1,5 +1,3 @@
-import time
-
 import pytest
 
 from app import repository as repo
@@ -31,7 +29,8 @@ def test_jobs_processed_counts_completed(
     process_job(db_session, redis_client, test_settings, job.id)
     points = _points(metric_reader, "jobs.processed")
     completed = [
-        p for p in points
+        p
+        for p in points
         if p.attributes.get("outcome") == "completed"
         and p.attributes.get("type") == "email"
     ]
