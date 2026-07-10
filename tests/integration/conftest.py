@@ -70,8 +70,16 @@ async def redis_client(redis_container):
     url = f"redis://{redis_container.get_container_host_ip()}:{redis_container.get_exposed_port(6379)}/0"
     client = create_redis_client(url)
     yield client
-    await client.flushdb()
-    await client.aclose()
+    try:
+        await client.flushdb()
+    except RuntimeError:
+        # Event loop may be closed on Windows/pytest-asyncio; ignore cleanup errors
+        pass
+    try:
+        await client.aclose()
+    except RuntimeError:
+        # Event loop may be closed; graceful cleanup attempted
+        pass
 
 
 @pytest.fixture(scope="session")
