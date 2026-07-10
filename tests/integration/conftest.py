@@ -2,6 +2,7 @@ import asyncio
 import sys
 
 import pytest
+import pytest_asyncio
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
@@ -65,21 +66,13 @@ def redis_container():
         yield rc
 
 
-@pytest.fixture
+@pytest_asyncio.fixture(loop_scope="function")
 async def redis_client(redis_container):
     url = f"redis://{redis_container.get_container_host_ip()}:{redis_container.get_exposed_port(6379)}/0"
     client = create_redis_client(url)
     yield client
-    try:
-        await client.flushdb()
-    except RuntimeError:
-        # Event loop may be closed on Windows/pytest-asyncio; ignore cleanup errors
-        pass
-    try:
-        await client.aclose()
-    except RuntimeError:
-        # Event loop may be closed; graceful cleanup attempted
-        pass
+    await client.flushdb()
+    await client.aclose()
 
 
 @pytest.fixture(scope="session")
