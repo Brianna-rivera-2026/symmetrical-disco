@@ -226,3 +226,24 @@ recovery is a manual procedure — see
 [`docs/runbooks/redis-total-loss-recovery.md`](docs/runbooks/redis-total-loss-recovery.md).
 
 For the full system design, see the [Phase 1 design](docs/superpowers/specs/2026-06-30-job-processing-phase1-design.md); for the persistence, redeploy-drain, and migration-discipline hardening described above, see [the production-hardening design](docs/superpowers/specs/2026-07-01-production-hardening-design.md).
+
+## Authentication
+
+All `/jobs*` routes require a per-user API key in the `X-API-Key` header
+(`/health`, `/ready`, and `/stats` stay open for probes). Jobs are scoped to
+the user that created them — other users' jobs return 404.
+
+Users are provisioned declaratively: `secrets/api_user_keys.json` maps user
+names to raw keys, and the one-shot `users-sync` service upserts them (hashed,
+SHA-256) into Postgres before the API starts.
+
+Setup:
+
+1. Generate a key per user: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+2. `cp secrets/api_user_keys.example.json secrets/api_user_keys.json` and fill in real keys.
+3. `docker compose up` — the sync runs automatically after migrations.
+
+Rotation: change the key in the secret file and restart (`docker compose up users-sync`).
+Revocation: remove the user's row from the `users` table (takes effect within
+`AUTH_CACHE_TTL_S`, default 60s), or rotate their key. Users removed from the
+secret file are NOT auto-deleted (upsert-only sync).

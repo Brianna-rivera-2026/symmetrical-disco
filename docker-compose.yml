@@ -39,6 +39,21 @@ services:
       postgres:
         condition: service_healthy
 
+  users-sync:
+    build: .
+    image: jobprocessor-app:${APP_TAG:-dev}
+    command: python -m app.users.sync
+    environment:
+      DATABASE_URL: postgresql+psycopg://jobs:jobs@postgres:5432/jobs
+      REDIS_URL: redis://redis:6379/0
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    secrets:
+      - api_user_keys
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.116.1
     command: ["--config=/etc/otelcol/config.yaml"]
@@ -65,6 +80,8 @@ services:
       start_period: 10s
     depends_on:
       migrate:
+        condition: service_completed_successfully
+      users-sync:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
@@ -122,3 +139,7 @@ services:
 volumes:
   pgdata:
   redisdata:
+
+secrets:
+  api_user_keys:
+    file: ./secrets/api_user_keys.json
