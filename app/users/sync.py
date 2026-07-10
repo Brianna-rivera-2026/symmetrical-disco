@@ -57,8 +57,13 @@ def run(settings: Settings) -> int:
                 count = sync_users(session, keys)
             span.set_attribute("users.synced_count", count)
             log.info("users.synced", extra={"count": count, "names": sorted(keys)})
-    except (OSError, ValueError, SQLAlchemyError):
-        log.error("users.sync_failed", exc_info=True)
+    except (OSError, ValueError, SQLAlchemyError) as exc:
+        # Deliberately not exc_info=True / str(exc): SQLAlchemyError's default
+        # __str__ includes the compiled statement AND its bound parameters,
+        # which for repo.upsert_user is the raw key_hash being written. Log
+        # only the exception type so operators get a useful diagnostic
+        # without a key hash ever reaching the log stream.
+        log.error("users.sync_failed", extra={"error_type": type(exc).__name__})
         exit_code = 1
     finally:
         engine.dispose()

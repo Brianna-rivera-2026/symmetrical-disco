@@ -2,6 +2,7 @@ import json
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from app import repository as repo
 from app.models.user import User
@@ -57,6 +58,41 @@ def test_sync_partial_failure_rolls_back(db_session, monkeypatch):
         sync.sync_users(db_session, {"alice": "key-a", "bob": "key-b"})
     db_session.rollback()
     assert _names_and_hashes(db_session) == {}  # nothing committed
+
+
+def test_run_db_failure_does_not_leak_key_hash_into_logs(
+    test_settings, tmp_path, monkeypatch, caplog
+):
+    """A SQLAlchemyError's default __str__ includes the compiled statement AND
+    its bound parameters (see sqlalchemy.exc.StatementError) — for
+    repo.upsert_user that's the raw key_hash being written. run() must never
+    pass that string (or a traceback containing it) to the logger."""
+    secret_hash = hash_key("super-secret-raw-key")
+
+    def boom(session, keys):
+        # Mimic what SQLAlchemy raises: a StatementError-like exception whose
+        # string representation embeds the bound parameter value.
+        raise SQLAlchemyError(
+            f"(psycopg.errors.UniqueViolation) duplicate key\n"
+            f"[SQL: INSERT INTO users ...]\n"
+            f"[parameters: {{'key_hash': '{secret_hash}'}}]"
+        )
+
+    monkeypatch.setattr(sync, "sync_users", boom)
+
+    keyfile = tmp_path / "keys.json"
+    keyfile.write_text(json.dumps({"alice": "super-secret-raw-key"}))
+    settings = test_settings.model_copy(update={"api_user_keys_file": str(keyfile)})
+
+    with caplog.at_level("ERROR", logger="app.users.sync"):
+        assert sync.run(settings) == 1
+
+    rendered = "\n".join(
+        f"{r.getMessage()} {getattr(r, 'error_type', '')}" for r in caplog.records
+    )
+    assert secret_hash not in rendered
+    assert "super-secret-raw-key" not in rendered
+    assert "SQLAlchemyError" in rendered
 
 
 def test_load_keys_rejects_bad_shapes(tmp_path):
