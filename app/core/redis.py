@@ -1,4 +1,4 @@
-import redis
+import redis.asyncio as redis
 
 
 def create_redis_client(redis_url: str) -> redis.Redis:

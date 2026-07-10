@@ -98,3 +98,11 @@ def test_timeout_invariant_rejects_handler_ge_visibility():
             job_handler_timeout_s=60.0,
             visibility_timeout_s=60.0,
         )
+
+
+def test_worker_concurrency_default_and_env(monkeypatch):
+    s = Settings(database_url="postgresql+psycopg://x/y", redis_url="redis://x")
+    assert s.worker_concurrency == 10
+    monkeypatch.setenv("WORKER_CONCURRENCY", "3")
+    s2 = Settings(database_url="postgresql+psycopg://x/y", redis_url="redis://x")
+    assert s2.worker_concurrency == 3
