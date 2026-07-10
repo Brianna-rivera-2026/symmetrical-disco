@@ -1,8 +1,8 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
-import redis
-from sqlalchemy.orm import Session
+import redis.asyncio as redis
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import repository as repo
 from app.core import metrics as app_metrics
@@ -20,8 +20,8 @@ def backoff_delay(attempts: int, schedule: list[int]) -> int:
     return schedule[idx]
 
 
-def schedule_retry_or_fail(
-    session: Session,
+async def schedule_retry_or_fail(
+    session: AsyncSession,
     client: redis.Redis,
     settings: Settings,
     job: Job,
@@ -32,7 +32,7 @@ def schedule_retry_or_fail(
     this actor won the guarded transition. Does not XACK."""
     n = job.attempts + 1  # the attempt that just ended
     if n >= job.max_attempts:
-        won = repo.fail_job(session, job.id, error)
+        won = await repo.fail_job(session, job.id, error)
         if won:
             app_metrics.jobs_failed.add(
                 1, {"type": job.type.value, "priority": job.priority.value}
@@ -45,27 +45,27 @@ def schedule_retry_or_fail(
 
     delay = backoff_delay(n, settings.retry_backoff_schedule)
     if delay <= 0:
-        won = repo.retry_to_pending(session, job.id)
+        won = await repo.retry_to_pending(session, job.id)
         if won:
-            enqueue(
+            await enqueue(
                 client,
                 settings.stream_for_priority(job.priority),
                 str(job.id),
                 carrier=carrier,
             )
-            repo.mark_synced(session, job.id)
+            await repo.mark_synced(session, job.id)
         log.info(
             "retry.immediate", extra={"job_id": str(job.id), "attempts": n, "won": won}
         )
         return won
 
     scheduled_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
-    won = repo.retry_to_scheduled(session, job.id, scheduled_at)
+    won = await repo.retry_to_scheduled(session, job.id, scheduled_at)
     if won:
-        delayed.schedule(
+        await delayed.schedule(
             client, settings.delayed_zset, str(job.id), scheduled_at.timestamp()
         )
-        repo.mark_synced(session, job.id)
+        await repo.mark_synced(session, job.id)
     log.info(
         "retry.delayed",
         extra={"job_id": str(job.id), "attempts": n, "delay": delay, "won": won},

@@ -1,9 +1,9 @@
 from datetime import datetime, timezone
 
-import redis
+import redis.asyncio as redis
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.models.job import Job
@@ -45,16 +45,16 @@ def pending_age_seconds(min_created_at: datetime | None, now: datetime) -> float
     return (now - min_created_at).total_seconds()
 
 
-def check_readiness(session: Session, client: redis.Redis) -> dict[str, str]:
+async def check_readiness(session: AsyncSession, client: redis.Redis) -> dict[str, str]:
     """Ping both backends independently; one failure never masks the other."""
     checks: dict[str, str] = {}
     try:
-        session.execute(text("SELECT 1"))
+        await session.execute(text("SELECT 1"))
         checks["postgres"] = "ok"
     except SQLAlchemyError:
         checks["postgres"] = "error"
     try:
-        client.ping()
+        await client.ping()
         checks["redis"] = "ok"
     except redis.RedisError:
         checks["redis"] = "error"
@@ -72,19 +72,19 @@ def _tolerate_nogroup(result, empty):
     return result
 
 
-def gather_stats(
-    session: Session, client: redis.Redis, settings: Settings
+async def gather_stats(
+    session: AsyncSession, client: redis.Redis, settings: Settings
 ) -> StatsResponse:
     stream_names = [stream for _, stream in settings.priority_streams]
     n = len(stream_names)
 
-    pipe = client.pipeline(transaction=False)
-    for stream in stream_names:
-        pipe.xinfo_groups(stream)
-    for stream in stream_names:
-        pipe.xinfo_consumers(stream, settings.consumer_group)
-    pipe.zcard(settings.delayed_zset)
-    results = pipe.execute(raise_on_error=False)
+    async with client.pipeline(transaction=False) as pipe:
+        for stream in stream_names:
+            pipe.xinfo_groups(stream)
+        for stream in stream_names:
+            pipe.xinfo_consumers(stream, settings.consumer_group)
+        pipe.zcard(settings.delayed_zset)
+        results = await pipe.execute(raise_on_error=False)
 
     groups = [_tolerate_nogroup(res, []) for res in results[:n]]
     # XAUTOCLAIM registers its consumer name in the group even when it claims
@@ -120,12 +120,12 @@ def gather_stats(
         workers=live_worker_count(consumers, cutoff_ms),
     )
 
-    status_rows = session.execute(
+    status_rows = (await session.execute(
         select(Job.status, func.count()).group_by(Job.status)
-    ).all()
-    min_created = session.execute(
+    )).all()
+    min_created = (await session.execute(
         select(func.min(Job.created_at)).where(Job.status == JobStatus.pending)
-    ).scalar_one()
+    )).scalar_one()
     jobs = JobStats(
         by_status=zero_fill_status_counts(status_rows),
         oldest_pending_age_seconds=pending_age_seconds(
