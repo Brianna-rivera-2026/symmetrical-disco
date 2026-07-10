@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
-from app import repository as repo
+from app.core.logging import JsonFormatter
 from app.models.user import User
 from app.users import sync
 from app.users.keys import hash_key
@@ -87,12 +87,27 @@ def test_run_db_failure_does_not_leak_key_hash_into_logs(
     with caplog.at_level("ERROR", logger="app.users.sync"):
         assert sync.run(settings) == 1
 
-    rendered = "\n".join(
-        f"{r.getMessage()} {getattr(r, 'error_type', '')}" for r in caplog.records
-    )
+    # Belt-and-suspenders: exc_info=True is what would smuggle the leaked
+    # parameter string in via record.exc_text/formatException, bypassing
+    # getMessage() entirely. Pin that it was never passed to log.error(...).
+    for record in caplog.records:
+        assert record.exc_info is None
+        assert record.exc_text is None
+
+    # The real assertion: render every captured record through the actual
+    # production JsonFormatter (app/core/logging.py) and inspect the exact
+    # JSON that would hit stdout, including the "exception" key that
+    # formatException populates when exc_info is truthy.
+    formatter = JsonFormatter()
+    rendered_lines = [formatter.format(r) for r in caplog.records]
+    rendered = "\n".join(rendered_lines)
     assert secret_hash not in rendered
     assert "super-secret-raw-key" not in rendered
     assert "SQLAlchemyError" in rendered
+
+    payloads = [json.loads(line) for line in rendered_lines]
+    assert not any("exception" in payload for payload in payloads)
+    assert any(payload.get("error_type") == "SQLAlchemyError" for payload in payloads)
 
 
 def test_load_keys_rejects_bad_shapes(tmp_path):
