@@ -4,7 +4,7 @@ from uuid import UUID
 
 from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cursor import decode_cursor, encode_cursor
 from app.models.job import Job
@@ -16,8 +16,8 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def create_job(
-    session: Session,
+async def create_job(
+    session: AsyncSession,
     job_type: JobType,
     payload: dict,
     *,
@@ -43,25 +43,25 @@ def create_job(
         user_id=user_id,
     )
     session.add(job)
-    session.commit()
-    session.refresh(job)
+    await session.commit()
+    await session.refresh(job)
     return job
 
 
-def get_job(
-    session: Session, job_id: UUID, *, user_id: UUID | None = None
+async def get_job(
+    session: AsyncSession, job_id: UUID, *, user_id: UUID | None = None
 ) -> Job | None:
     """user_id=None is the unscoped internal form (worker, post-ownership
     re-reads). API routes must always pass the caller's id."""
     if user_id is None:
-        return session.get(Job, job_id)
-    return session.execute(
+        return await session.get(Job, job_id)
+    return (await session.execute(
         select(Job).where(Job.id == job_id, Job.user_id == user_id)
-    ).scalar_one_or_none()
+    )).scalar_one_or_none()
 
 
-def list_jobs(
-    session: Session,
+async def list_jobs(
+    session: AsyncSession,
     *,
     status: JobStatus | None = None,
     job_type: JobType | None = None,
@@ -84,7 +84,7 @@ def list_jobs(
         stmt = stmt.where(tuple_(Job.created_at, Job.id) < (c_created, c_id))
     stmt = stmt.order_by(Job.created_at.desc(), Job.id.desc()).limit(limit + 1)
 
-    rows = list(session.execute(stmt).scalars())
+    rows = list((await session.execute(stmt)).scalars())
     next_cursor = None
     if len(rows) > limit:
         rows = rows[:limit]
@@ -93,12 +93,12 @@ def list_jobs(
     return rows, next_cursor
 
 
-def mark_synced(session: Session, job_id: UUID) -> None:
-    session.execute(update(Job).where(Job.id == job_id).values(is_synced_to_redis=True))
-    session.commit()
+async def mark_synced(session: AsyncSession, job_id: UUID) -> None:
+    await session.execute(update(Job).where(Job.id == job_id).values(is_synced_to_redis=True))
+    await session.commit()
 
 
-def claim_job(session: Session, job_id: UUID) -> bool:
+async def claim_job(session: AsyncSession, job_id: UUID) -> bool:
     stmt = (
         update(Job)
         .where(
@@ -107,15 +107,15 @@ def claim_job(session: Session, job_id: UUID) -> bool:
         )
         .values(status=JobStatus.processing, started_at=_now())
     )
-    result = session.execute(stmt)
-    session.commit()
+    result = await session.execute(stmt)
+    await session.commit()
     return result.rowcount == 1
 
 
-def complete_job(
-    session: Session, job_id: UUID, result: dict, progress: int | None = None
+async def complete_job(
+    session: AsyncSession, job_id: UUID, result: dict, progress: int | None = None
 ) -> bool:
-    res = session.execute(
+    res = await session.execute(
         update(Job)
         .where(Job.id == job_id, Job.status == JobStatus.processing)
         .values(
@@ -126,12 +126,12 @@ def complete_job(
             progress=progress if progress is not None else Job.progress,
         )
     )
-    session.commit()
+    await session.commit()
     return res.rowcount == 1
 
 
-def fail_job(session: Session, job_id: UUID, error: dict) -> bool:
-    res = session.execute(
+async def fail_job(session: AsyncSession, job_id: UUID, error: dict) -> bool:
+    res = await session.execute(
         update(Job)
         .where(Job.id == job_id, Job.status == JobStatus.processing)
         .values(
@@ -141,12 +141,12 @@ def fail_job(session: Session, job_id: UUID, error: dict) -> bool:
             attempts=Job.attempts + 1,
         )
     )
-    session.commit()
+    await session.commit()
     return res.rowcount == 1
 
 
-def retry_to_pending(session: Session, job_id: UUID) -> bool:
-    res = session.execute(
+async def retry_to_pending(session: AsyncSession, job_id: UUID) -> bool:
+    res = await session.execute(
         update(Job)
         .where(Job.id == job_id, Job.status == JobStatus.processing)
         .values(
@@ -156,12 +156,12 @@ def retry_to_pending(session: Session, job_id: UUID) -> bool:
             started_at=None,
         )
     )
-    session.commit()
+    await session.commit()
     return res.rowcount == 1
 
 
-def retry_to_scheduled(session: Session, job_id: UUID, scheduled_at: datetime) -> bool:
-    res = session.execute(
+async def retry_to_scheduled(session: AsyncSession, job_id: UUID, scheduled_at: datetime) -> bool:
+    res = await session.execute(
         update(Job)
         .where(Job.id == job_id, Job.status == JobStatus.processing)
         .values(
@@ -172,12 +172,12 @@ def retry_to_scheduled(session: Session, job_id: UUID, scheduled_at: datetime) -
             started_at=None,
         )
     )
-    session.commit()
+    await session.commit()
     return res.rowcount == 1
 
 
-def reset_failed_to_pending(session: Session, job_id: UUID) -> bool:
-    res = session.execute(
+async def reset_failed_to_pending(session: AsyncSession, job_id: UUID) -> bool:
+    res = await session.execute(
         update(Job)
         .where(Job.id == job_id, Job.status == JobStatus.failed)
         .values(
@@ -189,23 +189,23 @@ def reset_failed_to_pending(session: Session, job_id: UUID) -> bool:
             is_synced_to_redis=False,
         )
     )
-    session.commit()
+    await session.commit()
     return res.rowcount == 1
 
 
-def promote_scheduled_to_pending(session: Session, job_ids: list[UUID]) -> int:
+async def promote_scheduled_to_pending(session: AsyncSession, job_ids: list[UUID]) -> int:
     if not job_ids:
         return 0
-    result = session.execute(
+    result = await session.execute(
         update(Job)
         .where(Job.id.in_(job_ids), Job.status == JobStatus.scheduled)
         .values(status=JobStatus.pending)
     )
-    session.commit()
+    await session.commit()
     return result.rowcount
 
 
-def list_unsynced(session: Session, *, older_than: datetime, limit: int) -> list[Job]:
+async def list_unsynced(session: AsyncSession, *, older_than: datetime, limit: int) -> list[Job]:
     stmt = (
         select(Job)
         .where(
@@ -216,32 +216,32 @@ def list_unsynced(session: Session, *, older_than: datetime, limit: int) -> list
         .order_by(Job.created_at, Job.id)
         .limit(limit)
     )
-    return list(session.execute(stmt).scalars())
+    return list((await session.execute(stmt)).scalars())
 
 
-def get_promotion_info(
-    session: Session, job_ids: list[UUID]
+async def get_promotion_info(
+    session: AsyncSession, job_ids: list[UUID]
 ) -> dict[UUID, tuple[JobPriority, dict | None]]:
     if not job_ids:
         return {}
-    rows = session.execute(
+    rows = (await session.execute(
         select(Job.id, Job.priority, Job.trace_context).where(Job.id.in_(job_ids))
-    ).all()
+    )).all()
     return {row.id: (row.priority, row.trace_context) for row in rows}
 
 
-def init_progress(session: Session, job_id: UUID) -> bool:
-    res = session.execute(
+async def init_progress(session: AsyncSession, job_id: UUID) -> bool:
+    res = await session.execute(
         update(Job)
         .where(Job.id == job_id, Job.status == JobStatus.processing)
         .values(progress=0)
     )
-    session.commit()
+    await session.commit()
     return res.rowcount == 1
 
 
-def cancel_pending_or_scheduled(session: Session, job_id: UUID) -> bool:
-    res = session.execute(
+async def cancel_pending_or_scheduled(session: AsyncSession, job_id: UUID) -> bool:
+    res = await session.execute(
         update(Job)
         .where(
             Job.id == job_id,
@@ -249,41 +249,41 @@ def cancel_pending_or_scheduled(session: Session, job_id: UUID) -> bool:
         )
         .values(status=JobStatus.cancelled, completed_at=_now())
     )
-    session.commit()
+    await session.commit()
     return res.rowcount == 1
 
 
-def request_cancel(session: Session, job_id: UUID) -> bool:
-    res = session.execute(
+async def request_cancel(session: AsyncSession, job_id: UUID) -> bool:
+    res = await session.execute(
         update(Job)
         .where(Job.id == job_id, Job.status == JobStatus.processing)
         .values(cancel_requested_at=_now())
     )
-    session.commit()
+    await session.commit()
     return res.rowcount == 1
 
 
-def cancel_job(session: Session, job_id: UUID, summary: dict) -> bool:
-    res = session.execute(
+async def cancel_job(session: AsyncSession, job_id: UUID, summary: dict) -> bool:
+    res = await session.execute(
         update(Job)
         .where(Job.id == job_id, Job.status == JobStatus.processing)
         .values(status=JobStatus.cancelled, result=summary, completed_at=_now())
     )
-    session.commit()
+    await session.commit()
     return res.rowcount == 1
 
 
-def get_by_idempotency_key(session: Session, key: str, user_id: UUID) -> Job | None:
-    return session.execute(
+async def get_by_idempotency_key(session: AsyncSession, key: str, user_id: UUID) -> Job | None:
+    return (await session.execute(
         select(Job).where(Job.idempotency_key == key, Job.user_id == user_id)
-    ).scalar_one_or_none()
+    )).scalar_one_or_none()
 
 
-def count_by_status(session: Session) -> list[tuple[JobStatus, int]]:
-    return session.execute(select(Job.status, func.count()).group_by(Job.status)).all()
+async def count_by_status(session: AsyncSession) -> list[tuple[JobStatus, int]]:
+    return (await session.execute(select(Job.status, func.count()).group_by(Job.status))).all()
 
 
-def upsert_user(session: Session, name: str, key_hash: str) -> UUID:
+async def upsert_user(session: AsyncSession, name: str, key_hash: str) -> UUID:
     """Insert a user or rotate their key hash. Does NOT commit — the caller
     owns the transaction so multi-user syncs stay atomic."""
     stmt = (
@@ -292,10 +292,10 @@ def upsert_user(session: Session, name: str, key_hash: str) -> UUID:
         .on_conflict_do_update(index_elements=["name"], set_={"key_hash": key_hash})
         .returning(User.id)
     )
-    return session.execute(stmt).scalar_one()
+    return (await session.execute(stmt)).scalar_one()
 
 
-def get_user_by_key_hash(session: Session, key_hash: str) -> User | None:
-    return session.execute(
+async def get_user_by_key_hash(session: AsyncSession, key_hash: str) -> User | None:
+    return (await session.execute(
         select(User).where(User.key_hash == key_hash)
-    ).scalar_one_or_none()
+    )).scalar_one_or_none()

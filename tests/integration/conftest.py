@@ -1,3 +1,6 @@
+import asyncio
+import sys
+
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -13,6 +16,10 @@ from app.core.db import make_session_factory as _make_session_factory
 from app.core.redis import create_redis_client
 from app.main import create_app
 from app.users.keys import hash_key
+
+# Fix for Windows asyncio event loop policy with psycopg
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 DEFAULT_TEST_KEY = "default-user-key"
 SECOND_TEST_KEY = "second-user-key"
