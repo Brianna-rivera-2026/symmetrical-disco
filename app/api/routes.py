@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app import repository as repo
 from app.api.deps import get_db, get_redis
+from app.core import metrics as app_metrics
 from app.core.telemetry import current_trace_carrier
 from app.idempotency import canonical_hash
 from app.observability import check_readiness, gather_stats
@@ -90,6 +91,14 @@ def _create_and_handoff(session, client, settings, submission, key, req_hash):
         )
         enqueue(client, settings.stream_for_priority(submission.priority), str(job.id))
     repo.mark_synced(session, job.id)
+    app_metrics.jobs_submitted.add(
+        1,
+        {
+            "type": submission.type.value,
+            "priority": submission.priority.value,
+            "scheduled": job.status is JobStatus.scheduled,
+        },
+    )
     return job
 
 

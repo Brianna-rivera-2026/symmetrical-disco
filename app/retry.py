@@ -5,6 +5,7 @@ import redis
 from sqlalchemy.orm import Session
 
 from app import repository as repo
+from app.core import metrics as app_metrics
 from app.core.config import Settings
 from app.models.job import Job
 from app.queue import delayed
@@ -32,6 +33,10 @@ def schedule_retry_or_fail(
     n = job.attempts + 1  # the attempt that just ended
     if n >= job.max_attempts:
         won = repo.fail_job(session, job.id, error)
+        if won:
+            app_metrics.jobs_failed.add(
+                1, {"type": job.type.value, "priority": job.priority.value}
+            )
         log.info(
             "retry.failed_permanent",
             extra={"job_id": str(job.id), "attempts": n, "won": won},

@@ -10,6 +10,7 @@ from opentelemetry import trace
 from sqlalchemy.orm import Session
 
 from app import repository as repo
+from app.core import metrics as app_metrics
 from app.core.config import Settings
 from app.core.db import make_engine, make_session_factory
 from app.core.redis import create_redis_client
@@ -47,6 +48,7 @@ def promote_due(session: Session, client: redis.Redis, settings: Settings) -> in
             routed.append((stream, message_fields(stream, i, carrier)))
         delayed.promote(client, settings.delayed_zset, routed, ids)
         repo.promote_scheduled_to_pending(session, [UUID(i) for i in ids])
+        app_metrics.ticker_promoted.add(len(routed))
         log.info("ticker.promoted", extra={"enqueued": len(routed), "pulled": len(ids)})
     return len(ids)
 
@@ -88,6 +90,8 @@ def reconcile_orphans(session: Session, client: redis.Redis, settings: Settings)
                 total += 1
         if len(rows) < settings.reconcile_batch_size:
             break
+    if total:
+        app_metrics.ticker_reconciled.add(total)
     return total
 
 
@@ -164,6 +168,7 @@ def reap_stale(session: Session, client: redis.Redis, settings: Settings) -> int
             if cursor == "0-0":
                 break
     if handled:
+        app_metrics.ticker_reaped.add(handled)
         log.info("ticker.reaped", extra={"count": handled})
     return handled
 

@@ -1,5 +1,6 @@
 import logging
 import signal
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from uuid import UUID
@@ -13,6 +14,7 @@ from sqlalchemy.orm import Session
 from app import repository as repo
 from app.core.config import Settings
 from app.core.db import make_engine, make_session_factory
+from app.core import metrics as app_metrics
 from app.core.logging import bind_log_context, bind_static_log_context
 from app.core.redis import create_redis_client
 from app.jobs.handlers import JobCancelled
@@ -35,6 +37,18 @@ class Outcome:
     label: str
 
 
+def _record_outcome(job, label: str, started: float) -> None:
+    attrs: dict[str, str] = {"outcome": label}
+    if job is not None:
+        attrs["type"] = job.type.value
+        attrs["priority"] = job.priority.value
+    app_metrics.jobs_processed.add(1, attrs)
+    app_metrics.job_processing_duration.record(
+        time.monotonic() - started,
+        {k: v for k, v in attrs.items() if k in ("type", "outcome")},
+    )
+
+
 def process_job(
     session: Session,
     client: redis.Redis,
@@ -42,8 +56,10 @@ def process_job(
     job_id: UUID,
     session_factory: Callable[[], Session] | None = None,
 ) -> Outcome:
+    started = time.monotonic()
     if not repo.claim_job(session, job_id):
         log.info("job.skipped", extra={"reason": "not_claimable"})
+        _record_outcome(None, "skipped", started)
         return Outcome(ack=True, recycle=False, label="skipped")
 
     job = repo.get_job(session, job_id)
@@ -63,6 +79,7 @@ def process_job(
     except JobCancelled as cancelled:
         won = repo.cancel_job(session, job.id, cancelled.summary)
         log.info("job.cancelled", extra={"won": won})
+        _record_outcome(job, "cancelled", started)
         return Outcome(ack=won, recycle=False, label="cancelled")
     except HandlerTimeout as timeout_exc:
         span.record_exception(timeout_exc)
@@ -78,6 +95,7 @@ def process_job(
             },
         )
         log.warning("job.timeout", extra={"won": won})
+        _record_outcome(job, "timeout", started)
         return Outcome(ack=won, recycle=True, label="timeout")
     except Exception as exc:  # noqa: BLE001 — any handler/validation error is retryable
         span.record_exception(exc)
@@ -93,13 +111,16 @@ def process_job(
             "job.retry_scheduled",
             extra={"error_type": type(exc).__name__, "won": won},
         )
+        _record_outcome(job, "retried", started)
         return Outcome(ack=won, recycle=False, label="retried")
 
     won = repo.complete_job(session, job.id, result, progress=100 if is_batch else None)
     if not won:
         log.critical("job.complete_lost_to_reaper")
+        _record_outcome(job, "lost", started)
         return Outcome(ack=False, recycle=False, label="lost")
     log.info("job.completed")
+    _record_outcome(job, "completed", started)
     return Outcome(ack=True, recycle=False, label="completed")
 
 
@@ -114,6 +135,10 @@ def handle_message(
     """Process one delivered message inside a CONSUMER span that continues
     the trace carried in the message fields (or starts a new one)."""
     job_id = UUID(fields["job_id"])
+    sent_ms = int(message_id.split("-")[0])
+    app_metrics.job_queue_wait.record(
+        max(0.0, time.time() - sent_ms / 1000), {"stream": stream}
+    )
     parent = extract(fields)  # tolerates absent/malformed traceparent
     with bind_log_context(job_id=str(job_id), message_id=message_id, stream=stream):
         with _tracer.start_as_current_span(
