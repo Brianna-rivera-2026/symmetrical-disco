@@ -1,5 +1,5 @@
+import asyncio
 import random
-import time
 import uuid
 
 from app.schemas.payloads import (
@@ -25,33 +25,33 @@ class JobCancelled(Exception):
         self.summary = summary
 
 
-def handle_email(payload: EmailPayload, ctx) -> dict:
-    time.sleep(random.uniform(1, 3))
+async def handle_email(payload: EmailPayload, ctx) -> dict:
+    await asyncio.sleep(random.uniform(1, 3))
     return {"message_id": f"msg_{uuid.uuid4().hex[:12]}"}
 
 
-def handle_webhook(payload: WebhookPayload, ctx) -> dict:
-    time.sleep(random.uniform(1, 2))
+async def handle_webhook(payload: WebhookPayload, ctx) -> dict:
+    await asyncio.sleep(random.uniform(1, 2))
     if random.random() < 0.2:
         raise WebhookFailedError(f"webhook call to {payload.url} failed")
     return {"status": 200}
 
 
-def handle_report(payload: ReportPayload, ctx) -> dict:
-    time.sleep(random.uniform(3, 5))
+async def handle_report(payload: ReportPayload, ctx) -> dict:
+    await asyncio.sleep(random.uniform(3, 5))
     return {"file_url": f"https://reports.local/{uuid.uuid4().hex[:12]}.pdf"}
 
 
-def handle_batch(payload: BatchPayload, ctx) -> dict:
+async def handle_batch(payload: BatchPayload, ctx) -> dict:
     from app.jobs.registry import run_handler  # deferred: registry imports this module
 
     n = len(payload.items)
     summary = {"total": n, "succeeded": 0, "failed": 0, "results": [], "errors": []}
     for i, item in enumerate(payload.items):
-        if ctx.cancelled():
+        if await ctx.cancelled():
             raise JobCancelled(summary)
         try:
-            result = run_handler(item.type, item, ctx)
+            result = await run_handler(item.type, item, ctx)
             summary["succeeded"] += 1
             summary["results"].append({"index": i, "result": result})
         except Exception as exc:  # noqa: BLE001 — per-item, collected not raised

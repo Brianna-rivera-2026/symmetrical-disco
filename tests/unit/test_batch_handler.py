@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock
+
 import pytest
 
 from app.jobs import handlers
@@ -7,7 +9,7 @@ from app.schemas.payloads import BatchPayload
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
-    monkeypatch.setattr(handlers.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(handlers.asyncio, "sleep", AsyncMock())
 
 
 class _FakeCtx:
@@ -16,7 +18,7 @@ class _FakeCtx:
         self.calls = 0
         self.progress = []
 
-    def cancelled(self) -> bool:
+    async def cancelled(self) -> bool:
         hit = self.cancel_after is not None and self.calls >= self.cancel_after
         self.calls += 1
         return hit
@@ -25,7 +27,8 @@ class _FakeCtx:
         self.progress.append(pct)
 
 
-def test_batch_dispatches_real_handlers_mixed_success_and_failure(monkeypatch):
+@pytest.mark.asyncio
+async def test_batch_dispatches_real_handlers_mixed_success_and_failure(monkeypatch):
     monkeypatch.setattr(
         handlers.random, "random", lambda: 0.05
     )  # forces webhook < 0.2 -> fail
@@ -36,7 +39,7 @@ def test_batch_dispatches_real_handlers_mixed_success_and_failure(monkeypatch):
             {"type": "report", "report_type": "sales"},
         ]
     )
-    out = handle_batch(payload, _FakeCtx())
+    out = await handle_batch(payload, _FakeCtx())
     assert out["total"] == 3
     assert out["succeeded"] == 2
     assert out["failed"] == 1
@@ -48,7 +51,8 @@ def test_batch_dispatches_real_handlers_mixed_success_and_failure(monkeypatch):
     ]
 
 
-def test_batch_all_fail_still_completes(monkeypatch):
+@pytest.mark.asyncio
+async def test_batch_all_fail_still_completes(monkeypatch):
     monkeypatch.setattr(handlers.random, "random", lambda: 0.05)  # every webhook fails
     payload = BatchPayload(
         items=[
@@ -56,14 +60,15 @@ def test_batch_all_fail_still_completes(monkeypatch):
             {"type": "webhook", "url": "https://b.test"},
         ]
     )
-    out = handle_batch(payload, _FakeCtx())
+    out = await handle_batch(payload, _FakeCtx())
     assert out["succeeded"] == 0
     assert out["failed"] == 2
     assert out["results"] == []
     assert [e["index"] for e in out["errors"]] == [0, 1]
 
 
-def test_batch_raises_jobcancelled_with_partial_summary():
+@pytest.mark.asyncio
+async def test_batch_raises_jobcancelled_with_partial_summary():
     ctx = _FakeCtx(cancel_after=2)  # first two items processed, then cancel
     payload = BatchPayload(
         items=[
@@ -74,16 +79,17 @@ def test_batch_raises_jobcancelled_with_partial_summary():
         ]
     )
     with pytest.raises(JobCancelled) as exc:
-        handle_batch(payload, ctx)
+        await handle_batch(payload, ctx)
     assert exc.value.summary["succeeded"] == 2
     assert exc.value.summary["total"] == 4
     assert len(exc.value.summary["results"]) == 2
 
 
-def test_batch_reports_progress_per_item():
+@pytest.mark.asyncio
+async def test_batch_reports_progress_per_item():
     ctx = _FakeCtx()
     payload = BatchPayload(
         items=[{"type": "email", "to": "a@b.com", "subject": str(i)} for i in range(4)]
     )
-    handle_batch(payload, ctx)
+    await handle_batch(payload, ctx)
     assert ctx.progress == [25, 50, 75, 100]
