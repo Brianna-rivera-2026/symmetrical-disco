@@ -5,7 +5,7 @@
 
 ## Summary
 
-API-key authentication backed by a `users` table, with job ownership enforced in SQL. Callers present a per-user key in the `X-API-Key` header; all job routes require it, and every read/control operation is filtered to the caller's own jobs. Users and keys are provisioned declaratively: a sync script reads raw keys from environment-injected secrets and upserts them into the database before the API starts (init-container pattern), not via an HTTP endpoint or ad-hoc CLI.
+API-key authentication backed by a `users` table, with job ownership enforced in SQL. Callers present a per-user key in the `X-API-Key` header; all job routes require it, and every read/control operation is filtered to the caller's own jobs. Users and keys are provisioned declaratively: a sync script reads raw keys from a mounted secret file and upserts them into the database before the API starts (init-container pattern), not via an HTTP endpoint or ad-hoc CLI.
 
 ## Decisions made during brainstorming
 
@@ -13,7 +13,7 @@ API-key authentication backed by a `users` table, with job ownership enforced in
 |---|---|---|
 | Auth mechanism | Static per-user API keys | Fits a service-to-service job API; no login flow, token expiry, or IdP to run |
 | Protected surface | All job routes; `/health` and `/stats` stay open | Anonymous submission would leave jobs ownerless; health/stats are infra probes |
-| Provisioning | Declarative env-driven sync (init-container pattern), upsert-only | Self-healing on restart; secret store is where keys live; no admin auth surface. Chosen over an ad-hoc CLI during spec review |
+| Provisioning | Declarative sync from a mounted secret file (init-container pattern), upsert-only | Self-healing on restart; secret store is where keys live; no admin auth surface; keys never appear in the environment or process listing. Chosen over an ad-hoc CLI during spec review |
 | Implementation shape | Users table + FastAPI dependency | Matches existing DI patterns (`get_db`, `get_redis`); keys revocable; ownership enforced in SQL |
 | Key validation cost | In-process TTL cache (~60s) | Keeps per-request auth off the DB connection pool; revocation propagates within one TTL. Chosen during spec review |
 | Ownerless jobs | Workers drop them as failed | Ownership becomes a hard end-to-end invariant; covers legacy queue entries and deleted users. Added during spec review |
@@ -91,14 +91,14 @@ Run before the API starts, using the same application image:
 - **Kubernetes:** an init container on the API pod; the main container starts only after the sync exits 0.
 - **Docker Compose (this repo):** a one-shot service; the API service uses `depends_on: condition: service_completed_successfully`.
 
-**Input format:** a single env var, `API_USER_KEYS`, holding a JSON object of `{"<name>": "<raw key>", ...}`. It is parsed via pydantic-settings (`api_user_keys: dict[str, str]` on `Settings`, default `{}`), and in production is injected from the secret store (K8s Secret / compose env file).
+**Input format:** a mounted secret file containing a JSON object of `{"<name>": "<raw key>", ...}`. The path comes from `Settings` (`api_user_keys_file: str = "/run/secrets/api_user_keys"`, overridable via env); the sync script opens and parses it. In production the file is a K8s Secret volume mount or a Docker Compose `secrets:` entry — the raw keys never enter the environment, so they can't leak via `docker inspect`, `/proc/<pid>/environ`, or crash dumps of child processes. Only the sync container needs the mount; the API container does not.
 
 **Behavior:**
 
 - For each entry, compute the SHA-256 hash of the raw key and upsert by name: `INSERT ... ON CONFLICT (name) DO UPDATE SET key_hash = EXCLUDED.key_hash`.
-- **Upsert-only** — users absent from the env var are left untouched. Revocation is a manual row delete (or rotate the key in the secret so the old one stops matching).
+- **Upsert-only** — users absent from the file are left untouched. Revocation is a manual row delete (or rotate the key in the secret so the old one stops matching).
 - Idempotent and safe under concurrency: multiple replicas racing through sync converge on the same rows via the upsert.
-- Exits non-zero on malformed input or DB failure, which blocks API startup — a pod that can't provision its users doesn't serve traffic.
+- Exits non-zero on a missing/unreadable file, malformed JSON, or DB failure, which blocks API startup — a pod that can't provision its users doesn't serve traffic.
 - Rotation = change the key in the secret and restart; `DO UPDATE` swaps the hash. If the database is lost and recreated, the next restart repopulates all users automatically.
 - Logs each synced user name (never the key or hash) via structlog.
 
@@ -122,9 +122,9 @@ Run before the API starts, using the same application image:
 - **Fixture update:** a seeded test user + key header applied to existing route tests so they pass with auth enabled.
 - **Key cache tests:** second request with the same key does not query the database; after the user row is deleted, the key stops working once the TTL expires; unknown keys are never served from cache.
 - **Worker guard test:** a queued job with `user_id IS NULL` is marked failed with the "ownerless job dropped" error, acked, and its handler never runs.
-- **Sync script tests:** fresh insert, re-run with a changed key updates the hash (rotation), re-run with same input is a no-op, users not in the input are untouched, malformed input exits non-zero.
+- **Sync script tests:** fresh insert, re-run with a changed key updates the hash (rotation), re-run with same input is a no-op, users not in the input are untouched, missing or malformed secret file exits non-zero. Tests point `api_user_keys_file` at a tmp-path file.
 - **Integration (testcontainers):** one end-to-end test — run the sync entry point with two users, submit a job as one, fetch it with the right key (200) and the other user's key (404).
 
 ## Out of scope
 
-Key expiry, roles or admin tier, per-user stats, rate limiting, automatic reconciliation/deletion of users absent from `API_USER_KEYS`, and any backfill of legacy jobs' ownership. All deferred until a concrete need exists.
+Key expiry, roles or admin tier, per-user stats, rate limiting, automatic reconciliation/deletion of users absent from the secret file, and any backfill of legacy jobs' ownership. All deferred until a concrete need exists.
