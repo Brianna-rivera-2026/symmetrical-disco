@@ -12,7 +12,7 @@ API-key authentication backed by a `users` table, with job ownership enforced in
 | Decision | Choice | Rationale |
 |---|---|---|
 | Auth mechanism | Static per-user API keys | Fits a service-to-service job API; no login flow, token expiry, or IdP to run |
-| Protected surface | All job routes; `/health` and `/stats` stay open | Anonymous submission would leave jobs ownerless; health/stats are infra probes |
+| Protected surface | All job routes; `/health`, `/ready`, and `/stats` stay open | Anonymous submission would leave jobs ownerless; health/ready/stats are infra probes |
 | Provisioning | Declarative sync from a mounted secret file (init-container pattern), upsert-only | Self-healing on restart; secret store is where keys live; no admin auth surface; keys never appear in the environment or process listing. Chosen over an ad-hoc CLI during spec review |
 | Implementation shape | Users table + FastAPI dependency | Matches existing DI patterns (`get_db`, `get_redis`); keys revocable; ownership enforced in SQL |
 | Key validation cost | In-process TTL cache (~60s) | Keeps per-request auth off the DB connection pool; revocation propagates within one TTL. Chosen during spec review |
@@ -63,7 +63,7 @@ Enforced in SQL via `user_id` filters — no post-fetch checks, no read-then-ver
 | `POST /jobs/{id}/retry` | Ownership resolved via scoped fetch first; transition logic unchanged |
 | `POST /jobs/{id}/cancel` | Same as retry |
 | `GET /jobs` | Always filtered to caller's jobs; existing status/type/priority filters and cursor unchanged |
-| `GET /health` | Open (orchestration probes) |
+| `GET /health`, `GET /ready` | Open (liveness/readiness probes) |
 | `GET /stats` | Open; remains global counts (ops endpoint, not per-user) |
 
 Cross-user access returns **404**, not 403, so the API is not an existence oracle for other users' job IDs.
@@ -101,6 +101,29 @@ Run before the API starts, using the same application image:
 - Exits non-zero on a missing/unreadable file, malformed JSON, or DB failure, which blocks API startup — a pod that can't provision its users doesn't serve traffic.
 - Rotation = change the key in the secret and restart; `DO UPDATE` swaps the hash. If the database is lost and recreated, the next restart repopulates all users automatically.
 - Logs each synced user name (never the key or hash) via structlog.
+
+## Observability (OTel)
+
+Follows the existing conventions: instruments declared in `app/core/metrics.py` against the global MeterProvider (no-op proxies when OTel is disabled, so emission points never need guards); span attributes in the `job.*` style; telemetry configured and flushed per entrypoint.
+
+**Cardinality rule:** user identity (`user_id`, name) goes on **spans and logs only** — never as a metric attribute, where per-user labels would be unbounded.
+
+### Traces
+
+- **API requests:** FastAPIInstrumentor already creates the server spans. `get_current_user` sets `enduser.id` (the user's name) on the current span for authenticated requests, so every job-route trace is attributable. 401s are already captured by the instrumentation's status-code handling; no extra span work.
+- **Worker ownerless drop:** reuses the existing consumer span — sets `job.outcome = "dropped_ownerless"` (the attribute the worker already records for other outcomes).
+- **Sync script:** configures/flushes telemetry like the other three entrypoints and wraps its run in a `users.sync` span with a `users.synced_count` attribute (count only, no names or keys on the span).
+
+### Metrics (added to `app/core/metrics.py`)
+
+| Instrument | Type | Attributes | Meaning |
+|---|---|---|---|
+| `auth.validations` | counter | `result` (ok \| missing_key \| unknown_key), `source` (cache \| db \| n/a) | Every auth attempt; cache hit ratio and 401 rate fall out of the attributes |
+| `jobs.dropped_ownerless` | counter | — | Worker guard firings; should be ~0 in steady state, so any sustained rate is alertable |
+
+### Logs
+
+Already covered by existing wiring: `get_current_user` binds `user_id` into the structlog context, the OTel logging handler ships those records with trace correlation, and the sync script logs synced user names (never keys or hashes). Auth failures log at `warning` with the reason (missing vs unknown key) — no key material, ever.
 
 ## Error handling
 
