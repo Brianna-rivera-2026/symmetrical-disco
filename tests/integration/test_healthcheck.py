@@ -1,3 +1,5 @@
+import signal
+
 import httpx
 import pytest
 import pytest_asyncio
@@ -111,3 +113,46 @@ async def test_start_raises_cleanly_on_port_conflict(pg_engine, redis_client):
             await second.start()
     finally:
         await first.stop()
+
+
+async def test_worker_sigterm_handler_survives_health_server_running(
+    pg_engine, redis_client
+):
+    """Regression: uvicorn.Server.serve() wraps _serve() in
+    `with self.capture_signals(): ...`, which unconditionally calls
+    `signal.signal(sig, self.handle_exit)` for SIGINT/SIGTERM on the main
+    thread for the entire time serve() is running -- i.e. this health
+    server's whole lifetime. Left unchecked, this silently overrides the
+    worker/ticker's own `signal.signal(signal.SIGTERM, _request_stop)`
+    handler installed at startup, so a real SIGTERM sent to the worker would
+    hit uvicorn's handle_exit (which only flips server.should_exit) instead
+    of the worker's own graceful-shutdown flag. HealthServer must prevent
+    uvicorn from touching process signal handlers at all."""
+
+    def sentinel(signum, frame):  # pragma: no cover - never actually invoked
+        raise AssertionError("sentinel handler should not be called by uvicorn")
+
+    previous = signal.signal(signal.SIGTERM, sentinel)
+    try:
+        assert signal.getsignal(signal.SIGTERM) is sentinel
+
+        server = HealthServer(
+            port=0,
+            heartbeat=Heartbeat(),
+            max_heartbeat_age_s=30.0,
+            engine=pg_engine,
+            redis_client=redis_client,
+        )
+        await server.start()
+        try:
+            # While the health server is running, the worker's own SIGTERM
+            # handler must still be installed -- uvicorn must not have
+            # swapped in its own handle_exit.
+            assert signal.getsignal(signal.SIGTERM) is sentinel
+        finally:
+            await server.stop()
+
+        # And still intact after stop() too.
+        assert signal.getsignal(signal.SIGTERM) is sentinel
+    finally:
+        signal.signal(signal.SIGTERM, previous)

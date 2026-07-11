@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import socket
 import sys
 import time
@@ -101,7 +102,20 @@ class HealthServer:
             app, host="0.0.0.0", port=port, log_level="warning", access_log=False
         )
         self._server = uvicorn.Server(config)
-        self._server.install_signal_handlers = lambda: None
+        # uvicorn's Server has no `install_signal_handlers` attribute in this
+        # installed version (0.49.0) -- setting one is a silent no-op. The
+        # actual mechanism is `Server.serve()` doing
+        # `with self.capture_signals(): await self._serve(...)`, which
+        # unconditionally calls `signal.signal(sig, self.handle_exit)` for
+        # SIGINT/SIGTERM (and SIGBREAK on Windows) on the main thread for the
+        # entire duration `serve()` runs -- i.e. for this health server's
+        # whole lifetime, silently overriding the worker/ticker's own
+        # `signal.signal(signal.SIGTERM, _request_stop)` handler. Overriding
+        # the *instance's* `capture_signals` with a no-op context manager
+        # prevents uvicorn from ever touching process signal handlers, so the
+        # worker's own handler installed at startup remains in effect for the
+        # entire time this health server task is running.
+        self._server.capture_signals = contextlib.nullcontext
         self.port = port
 
     async def start(self) -> None:
