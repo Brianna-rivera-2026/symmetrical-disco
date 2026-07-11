@@ -75,6 +75,31 @@ async def redis_client(redis_container):
     await client.aclose()
 
 
+@pytest.fixture
+def sync_redis_client(redis_container):
+    """Plain sync `redis.Redis`, for exercising the ticker's OTel gauge
+    callbacks which run on the exporter thread and cannot await."""
+    import redis as sync_redis
+
+    url = f"redis://{redis_container.get_container_host_ip()}:{redis_container.get_exposed_port(6379)}/0"
+    client = sync_redis.Redis.from_url(url, decode_responses=True)
+    yield client
+    client.close()
+
+
+@pytest.fixture
+def sync_session_factory(database_url):
+    """Plain sync sessionmaker, for exercising the ticker's OTel gauge
+    callbacks which run on the exporter thread and cannot await."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    engine = create_engine(database_url, pool_pre_ping=True)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    yield factory
+    engine.dispose()
+
+
 @pytest.fixture(scope="session")
 def test_settings(database_url, redis_container) -> Settings:
     redis_url = f"redis://{redis_container.get_container_host_ip()}:{redis_container.get_exposed_port(6379)}/0"
