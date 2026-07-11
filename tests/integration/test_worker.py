@@ -116,6 +116,54 @@ async def test_process_job_timeout_then_worker_continues(
     assert outcome2.label == "completed"
 
 
+async def test_process_job_timeout_survives_full_expiration_on_rollback(
+    db_session, redis_client, test_settings, monkeypatch, owner_id
+):
+    """Regression test for a MissingGreenlet crash found in Docker verification.
+
+    session.rollback() expires every ORM attribute on objects loaded in the
+    session (independent of expire_on_commit). The HandlerTimeout branch of
+    process_job used to keep referencing the pre-rollback `job` ORM object
+    afterward; `schedule_retry_or_fail`'s plain (un-awaited) `job.attempts`
+    access then tried to lazy-load the expired attribute, which requires an
+    active SQLAlchemy async-greenlet bridge that a bare attribute access
+    doesn't have — raising `sqlalchemy.exc.MissingGreenlet` and crashing the
+    whole worker TaskGroup. Whether the ORM happens to still have unexpired
+    attributes cached at that point is timing/connection-pool sensitive,
+    which is why the plain existing timeout test didn't reliably catch this.
+    This test forces the worst case directly with session.expire_all()
+    monkeypatched onto rollback, so it fails deterministically without the
+    fix and passes deterministically with it.
+    """
+    settings = test_settings.model_copy(update={"job_handler_timeout_s": 0.05})
+
+    async def _slow(*_a, **_kw):
+        await _real_sleep(0.5)
+
+    monkeypatch.setattr(handlers.asyncio, "sleep", _slow)
+
+    real_rollback = db_session.rollback
+
+    async def _rollback_and_expire_everything():
+        await real_rollback()
+        db_session.expire_all()  # force worst-case expiration of every object
+
+    monkeypatch.setattr(db_session, "rollback", _rollback_and_expire_everything)
+
+    job = await repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
+    )
+
+    # Must not raise sqlalchemy.exc.MissingGreenlet (or anything else).
+    outcome = await process_job(db_session, redis_client, settings, job.id)
+
+    assert outcome.label == "timeout"
+    assert outcome.ack is True
+    await db_session.refresh(job)
+    assert job.status is JobStatus.pending
+    assert job.attempts == 1
+
+
 async def test_run_forever_processes_one_then_stops(
     test_settings, redis_client, pg_engine, owner_id
 ):

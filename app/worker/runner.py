@@ -4,6 +4,7 @@ import signal
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from uuid import UUID
 
 import psutil
@@ -116,28 +117,47 @@ async def process_job(
         _record_outcome(job, "cancelled", started)
         return Outcome(ack=won, label="cancelled")
     except HandlerTimeout as timeout_exc:
+        # Capture every field still needed below *before* the rollback: a
+        # rollback expires all ORM objects loaded in this session (regardless
+        # of expire_on_commit), and schedule_retry_or_fail/_record_outcome do
+        # plain synchronous attribute access on `job` — a lazy-reload of an
+        # expired attribute needs an awaited greenlet context that a bare
+        # attribute access doesn't have, raising MissingGreenlet.
+        job_snapshot = SimpleNamespace(
+            id=job.id,
+            type=job.type,
+            priority=job.priority,
+            attempts=job.attempts,
+            max_attempts=job.max_attempts,
+        )
         await (
             session.rollback()
         )  # discard any state the cancelled handler left mid-flight
         span.record_exception(timeout_exc)
         span.set_status(Status(StatusCode.ERROR, "HandlerTimeout"))
+        # Use the pre-rollback snapshot, not `job`, from here on: rollback
+        # expires every ORM attribute on `job`, and a bare (un-awaited)
+        # attribute access on an expired attribute would try to lazy-load via
+        # the async greenlet bridge outside of any awaited call, raising
+        # sqlalchemy.exc.MissingGreenlet.
         won = await schedule_retry_or_fail(
             session,
             client,
             settings,
-            job,
+            job_snapshot,
             {
                 "type": "HandlerTimeout",
                 "message": f">{settings.job_handler_timeout_s}s",
             },
         )
         log.warning("job.timeout", extra={"won": won})
-        _record_outcome(job, "timeout", started)
+        _record_outcome(job_snapshot, "timeout", started)
         return Outcome(ack=won, label="timeout")
     except asyncio.CancelledError:
         # External cancellation (shutdown): roll back before propagating so the
         # job row isn't left with a half-written transaction; the reaper will
-        # reclaim the message.
+        # reclaim the message. Nothing touches `job` after this, so no
+        # capture is needed here.
         await session.rollback()
         raise
     except Exception as exc:  # noqa: BLE001 — any handler/validation error is retryable
