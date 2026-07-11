@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from app import repository as repo
@@ -8,7 +10,10 @@ from app.worker.runner import process_job
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
-    monkeypatch.setattr(handlers.time, "sleep", lambda *_: None)
+    async def no_sleep(*_):
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
 
 
 def _points(metric_reader, name):
@@ -28,7 +33,7 @@ async def test_jobs_processed_counts_completed(
     job = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
     )
-    process_job(db_session, redis_client, test_settings, job.id)
+    await process_job(db_session, redis_client, test_settings, job.id)
     points = _points(metric_reader, "jobs.processed")
     completed = [
         p
@@ -45,7 +50,7 @@ async def test_processing_duration_recorded(
     job = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
     )
-    process_job(db_session, redis_client, test_settings, job.id)
+    await process_job(db_session, redis_client, test_settings, job.id)
     points = _points(metric_reader, "job.processing.duration")
     assert any(
         p.attributes.get("outcome") == "completed" and p.count >= 1 for p in points
@@ -63,7 +68,7 @@ async def test_jobs_failed_counts_exhausted_attempts(
         max_attempts=1,
         user_id=owner_id,
     )
-    process_job(db_session, redis_client, test_settings, job.id)
+    await process_job(db_session, redis_client, test_settings, job.id)
     points = _points(metric_reader, "jobs.failed")
     failed = [p for p in points if p.attributes.get("type") == "webhook"]
     assert failed and failed[0].value >= 1
