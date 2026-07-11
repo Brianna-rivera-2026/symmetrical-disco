@@ -84,7 +84,6 @@ def test_failure_handling_defaults():
     assert s.reaper_batch_size == 100
     assert s.max_attempts == 4
     assert s.retry_backoff_schedule == [0, 30, 120]
-    assert s.max_handler_timeouts_before_recycle == 1
 
 
 def test_timeout_invariant_rejects_handler_ge_visibility():

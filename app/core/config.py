@@ -29,7 +29,6 @@ class Settings(BaseSettings):
     reaper_batch_size: int = 100
     max_attempts: int = 4
     retry_backoff_schedule: list[int] = [0, 30, 120]
-    max_handler_timeouts_before_recycle: int = 1
     cancel_poll_interval_s: float = 2.0
     worker_concurrency: int = 10
     auth_cache_ttl_s: float = 60.0
