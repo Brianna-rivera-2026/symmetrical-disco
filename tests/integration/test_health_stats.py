@@ -73,7 +73,7 @@ async def test_stats_workers_excludes_reaper_consumer(client, db_session, redis_
     # registers its own consumer name in the group as a side effect even when
     # it claims zero messages, so this leaves a "reaper" consumer behind on
     # every stream.
-    reap_stale(db_session, r, s)
+    await reap_stale(db_session, r, s)
 
     body = client.get("/stats").json()
 
