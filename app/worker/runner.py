@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import signal
 import time
@@ -6,12 +7,12 @@ from dataclasses import dataclass
 from uuid import UUID
 
 import psutil
-import redis
+import redis.asyncio as redis
 from opentelemetry import metrics, trace
 from opentelemetry.metrics import Observation
 from opentelemetry.propagate import extract
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import repository as repo
 from app.core.config import Settings
@@ -39,7 +40,6 @@ _process = psutil.Process()
 @dataclass
 class Outcome:
     ack: bool
-    recycle: bool
     label: str
 
 
@@ -76,49 +76,52 @@ def _record_outcome(job, label: str, started: float) -> None:
     )
 
 
-def process_job(
-    session: Session,
+async def process_job(
+    session: AsyncSession,
     client: redis.Redis,
     settings: Settings,
     job_id: UUID,
-    session_factory: Callable[[], Session] | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> Outcome:
     started = time.monotonic()
-    if not repo.claim_job(session, job_id):
+    if not await repo.claim_job(session, job_id):
         log.info("job.skipped", extra={"reason": "not_claimable"})
         _record_outcome(None, "skipped", started)
-        return Outcome(ack=True, recycle=False, label="skipped")
+        return Outcome(ack=True, label="skipped")
 
-    job = repo.get_job(session, job_id)
+    job = await repo.get_job(session, job_id)
     span = trace.get_current_span()
     span.set_attribute("job.type", job.type.value)
     span.set_attribute("job.priority", job.priority.value)
     span.set_attribute("job.attempt", job.attempts + 1)
     if job.user_id is None:
-        won = repo.fail_job(session, job.id, {"reason": "ownerless job dropped"})
+        won = await repo.fail_job(session, job.id, {"reason": "ownerless job dropped"})
         app_metrics.jobs_dropped_ownerless.add(1)
         log.warning("job.dropped_ownerless", extra={"won": won})
         _record_outcome(job, "dropped_ownerless", started)
-        return Outcome(ack=won, recycle=False, label="dropped_ownerless")
+        return Outcome(ack=won, label="dropped_ownerless")
     span.set_attribute("enduser.id", str(job.user_id))
     is_batch = job.type == JobType.batch
     if is_batch:
-        repo.init_progress(session, job.id)
+        await repo.init_progress(session, job.id)
     ctx = PgJobContext(job.id, session_factory, settings.cancel_poll_interval_s)
     try:
         payload = validate_payload(job.type, job.payload)
-        result = run_with_timeout(
-            lambda: run_handler(job.type, payload, ctx), settings.job_handler_timeout_s
+        result = await run_with_timeout(
+            run_handler(job.type, payload, ctx), settings.job_handler_timeout_s
         )
     except JobCancelled as cancelled:
-        won = repo.cancel_job(session, job.id, cancelled.summary)
+        won = await repo.cancel_job(session, job.id, cancelled.summary)
         log.info("job.cancelled", extra={"won": won})
         _record_outcome(job, "cancelled", started)
-        return Outcome(ack=won, recycle=False, label="cancelled")
+        return Outcome(ack=won, label="cancelled")
     except HandlerTimeout as timeout_exc:
+        await (
+            session.rollback()
+        )  # discard any state the cancelled handler left mid-flight
         span.record_exception(timeout_exc)
         span.set_status(Status(StatusCode.ERROR, "HandlerTimeout"))
-        won = schedule_retry_or_fail(
+        won = await schedule_retry_or_fail(
             session,
             client,
             settings,
@@ -130,11 +133,17 @@ def process_job(
         )
         log.warning("job.timeout", extra={"won": won})
         _record_outcome(job, "timeout", started)
-        return Outcome(ack=won, recycle=True, label="timeout")
+        return Outcome(ack=won, label="timeout")
+    except asyncio.CancelledError:
+        # External cancellation (shutdown): roll back before propagating so the
+        # job row isn't left with a half-written transaction; the reaper will
+        # reclaim the message.
+        await session.rollback()
+        raise
     except Exception as exc:  # noqa: BLE001 — any handler/validation error is retryable
         span.record_exception(exc)
         span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
-        won = schedule_retry_or_fail(
+        won = await schedule_retry_or_fail(
             session,
             client,
             settings,
@@ -146,20 +155,22 @@ def process_job(
             extra={"error_type": type(exc).__name__, "won": won},
         )
         _record_outcome(job, "retried", started)
-        return Outcome(ack=won, recycle=False, label="retried")
+        return Outcome(ack=won, label="retried")
 
-    won = repo.complete_job(session, job.id, result, progress=100 if is_batch else None)
+    won = await repo.complete_job(
+        session, job.id, result, progress=100 if is_batch else None
+    )
     if not won:
         log.critical("job.complete_lost_to_reaper")
         _record_outcome(job, "lost", started)
-        return Outcome(ack=False, recycle=False, label="lost")
+        return Outcome(ack=False, label="lost")
     log.info("job.completed")
     _record_outcome(job, "completed", started)
-    return Outcome(ack=True, recycle=False, label="completed")
+    return Outcome(ack=True, label="completed")
 
 
-def handle_message(
-    session_factory: Callable[[], Session],
+async def handle_message(
+    session_factory: async_sessionmaker[AsyncSession],
     client: redis.Redis,
     settings: Settings,
     stream: str,
@@ -191,17 +202,19 @@ def handle_message(
             },
         ) as span:
             log.info("job.received")
-            with session_factory() as session:
-                outcome = process_job(
+            async with session_factory() as session:
+                outcome = await process_job(
                     session, client, settings, job_id, session_factory
                 )
             span.set_attribute("job.outcome", outcome.label)
         if outcome.ack:
-            ack(client, stream, settings.consumer_group, message_id)
+            await ack(client, stream, settings.consumer_group, message_id)
         return outcome
 
 
-def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -> int:
+async def run_forever(
+    settings: Settings, *, stop: Callable[[], bool] | None = None
+) -> int:
     configure_telemetry(settings, "jobs-worker", instance_id=CONSUMER_NAME)
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
@@ -219,10 +232,10 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
             engine=engine,
             redis_client=client,
         )
-        health_server.start()
+        await health_server.start()
 
     for stream in settings.ordered_streams:
-        ensure_group(client, stream, settings.consumer_group)
+        await ensure_group(client, stream, settings.consumer_group)
 
     if settings.otel_enabled:
         register_worker_resource_gauges()
@@ -238,40 +251,53 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
     bind_static_log_context(consumer=CONSUMER_NAME)
     log.info(
         "worker.started",
-        extra={"streams": settings.ordered_streams, "group": settings.consumer_group},
+        extra={
+            "streams": settings.ordered_streams,
+            "group": settings.consumer_group,
+            "concurrency": settings.worker_concurrency,
+        },
     )
 
     def _should_stop() -> bool:
         return shutting_down["flag"] or (stop() if stop else False)
 
-    timeouts = 0
-    exit_code = 0
-    while not _should_stop():
-        heartbeat.beat()
-        batch = read_priority(
-            client,
-            settings.ordered_streams,
-            settings.consumer_group,
-            CONSUMER_NAME,
-            settings.block_ms,
-        )
-        for stream, message_id, fields in batch:
-            outcome = handle_message(
+    sem = asyncio.Semaphore(settings.worker_concurrency)
+
+    async def _run_one(stream: str, message_id: str, fields: dict) -> None:
+        try:
+            await handle_message(
                 session_factory, client, settings, stream, message_id, fields
             )
-            if outcome.recycle:
-                timeouts += 1
-                if timeouts >= settings.max_handler_timeouts_before_recycle:
-                    log.warning("worker.recycling", extra={"timeouts": timeouts})
-                    exit_code = 1
-                    break
-        if exit_code:
-            break
+        finally:
+            sem.release()
 
-    log.info("worker.stopped", extra={"exit_code": exit_code})
+    async with asyncio.TaskGroup() as tg:
+        while not _should_stop():
+            heartbeat.beat()
+            await sem.acquire()  # wait for a free slot before pulling work
+            try:
+                batch = await read_priority(
+                    client,
+                    settings.ordered_streams,
+                    settings.consumer_group,
+                    CONSUMER_NAME,
+                    settings.block_ms,
+                    count=1,
+                )
+            except BaseException:
+                sem.release()
+                raise
+            if not batch:
+                sem.release()
+                continue
+            stream, message_id, fields = batch[0]
+            tg.create_task(_run_one(stream, message_id, fields))
+        # Exiting the `async with` waits for in-flight jobs to finish draining.
+
+    log.info("worker.stopped")
     if health_server is not None:
-        health_server.stop()
+        await health_server.stop()
     shutdown_telemetry()
-    client.close()
-    engine.dispose()
-    return exit_code
+    await client.aclose()
+    await engine.dispose()
+    return 0

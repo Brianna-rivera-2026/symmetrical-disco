@@ -1,3 +1,4 @@
+import asyncio
 import sys
 
 from app.core.config import get_settings
@@ -8,7 +9,7 @@ from app.worker.runner import run_forever
 def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
-    sys.exit(run_forever(settings))
+    sys.exit(asyncio.run(run_forever(settings)))
 
 
 if __name__ == "__main__":
