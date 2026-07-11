@@ -51,13 +51,16 @@ Internet ──► OpenShift Route (edge TLS)
   "gateway with HTTPS certificate, only this exposed."
 - **NetworkPolicies**: default-deny **ingress and egress**; explicit ingress
   allows — router→api:8000, api/worker/ticker→pgbouncer:6432,
-  pgbouncer→postgres:5432, apps→redis:6379, apps→otel:4317, kubelet→probe
+  pgbouncer→postgres:5432, hook Jobs (migrate, users-sync)→postgres:5432,
+  apps→redis:6379, apps→otel:4317, kubelet→probe
   ports — and matching egress allows (each pod may reach only its declared
   dependencies, plus DNS to the cluster resolver). This is the OpenShift form of
   the "internal network" requirement.
-- **Apps connect to PgBouncer, never Postgres directly.** The migration Job connects
-  straight to Postgres (DDL and session state do not belong behind transaction
-  pooling).
+- **Apps connect to PgBouncer, never Postgres directly.** The migrate and
+  users-sync hook Jobs connect straight to Postgres (DDL and session state do
+  not belong behind transaction pooling, and PgBouncer may not be up yet when
+  hooks run), so the NetworkPolicies carry explicit hook-Job→postgres:5432
+  ingress/egress allowances.
 - All pods run under the `restricted-v2` SCC: no root, no fixed UIDs. Images must
   tolerate arbitrary UIDs (official `postgres`/`redis` do; PgBouncer uses an
   SCC-friendly image such as `edoburu/pgbouncer`).
@@ -72,7 +75,12 @@ Internet ──► OpenShift Route (edge TLS)
     `service.beta.openshift.io/serving-cert-secret-name`
   - `pgbouncer-*`: Deployment + Service
   - `migrate-job.yaml`, `users-sync-job.yaml`: Helm hook Jobs
-    (`pre-install,pre-upgrade`, `backoffLimit: 2`) replacing Compose `depends_on`
+    (`post-install,pre-upgrade`, `backoffLimit: 2`) replacing Compose
+    `depends_on`. `pre-install` is wrong here: pre-install hooks run before any
+    chart resources exist, so on first install the Jobs would wait forever for
+    Postgres. With `post-install`, first-install app pods start before the
+    schema exists and simply stay not-Ready (readiness probe checks DB) until
+    migration completes; on upgrades, `pre-upgrade` gates the rollout as before.
   - `networkpolicies.yaml` (default-deny ingress + egress, plus per-service allows)
   - `otel-collector-cr.yaml`: `OpenTelemetryCollector` CR behind `otel.enabled`
   - Secrets/ConfigMaps (passwords, service-CA bundle, app config)
@@ -157,7 +165,9 @@ Internet ──► OpenShift Route (edge TLS)
 
 ## Failure modes
 
-- Migration hook Job fails → install/upgrade aborts before app pods roll.
+- Migration hook Job fails → upgrade aborts before app pods roll
+  (`pre-upgrade`); on first install a failed `post-install` hook marks the
+  release failed while app pods stay not-Ready.
 - Recycler drain overrun → pod killed at grace-period expiry; Redis Streams
   pending-entry reclaim (existing failure-handling design) recovers the job.
 - Operators absent but flags enabled → CR apply fails visibly at install; with
