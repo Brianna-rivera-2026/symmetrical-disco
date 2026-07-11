@@ -1,0 +1,176 @@
+# OpenShift Deployment Design
+
+**Date:** 2026-07-11
+**Requirement:** `docs/requirements/09-deployment.md`
+**Status:** Approved
+
+## Goal
+
+Deploy the job processing system to OpenShift via a Helm chart, verified live on
+OpenShift Local (CRC). Covers: TLS for Postgres/Redis, internal network isolation,
+an HTTPS gateway as the only exposed entry point, health/readiness probes,
+OpenTelemetry collection via the Red Hat OTel operator, memory-threshold worker
+self-recycling, and PgBouncer with KEDA-driven autoscaling bounded by connection
+math.
+
+Docker Compose remains the local dev environment and is not changed by this work.
+
+## Decisions
+
+| Decision | Choice |
+|---|---|
+| Primary target | OpenShift; Compose stays as-is for local dev |
+| Verification | Live on OpenShift Local (CRC) + static `helm lint`/`helm template` |
+| Postgres/Redis | In-chart StatefulSets (self-contained, SCC-safe) |
+| TLS issuance | OpenShift service-serving-cert signer; Route with edge TLS |
+| Worker recycling trigger | Max memory (RSS) only |
+| Worker autoscaling | KEDA `redis-streams` scaler on queue lag |
+| OTel | Red Hat build of OpenTelemetry operator; chart ships the `OpenTelemetryCollector` CR |
+| Operator handling | App chart carries CRs behind values flags; operators installed once by a bootstrap script (Approach B) |
+
+## Runtime topology (one namespace)
+
+```
+Internet ──► OpenShift Route (edge TLS)
+                 │
+             Service: api            ◄── only externally reachable component
+                 │
+   ┌─────────────┼───────────────────────────────┐
+   │  internal (NetworkPolicy default-deny)      │
+   │  api / worker / ticker Deployments          │
+   │     │            │                          │
+   │     ▼            ▼                          │
+   │  pgbouncer ──► postgres StatefulSet (TLS)   │
+   │  redis StatefulSet (TLS-only)               │
+   │  otel collector (operator-managed, via CR)  │
+   └─────────────────────────────────────────────┘
+```
+
+- **Route**: `tls.termination: edge` using the cluster router certificate. Satisfies
+  "gateway with HTTPS certificate, only this exposed."
+- **NetworkPolicies**: default-deny ingress; explicit allows — router→api:8000,
+  api/worker/ticker→pgbouncer:6432, pgbouncer→postgres:5432, apps→redis:6379,
+  apps→otel:4317, kubelet→probe ports. This is the OpenShift form of the
+  "internal network" requirement.
+- **Apps connect to PgBouncer, never Postgres directly.** The migration Job connects
+  straight to Postgres (DDL and session state do not belong behind transaction
+  pooling).
+- All pods run under the `restricted-v2` SCC: no root, no fixed UIDs. Images must
+  tolerate arbitrary UIDs (official `postgres`/`redis` do; PgBouncer uses an
+  SCC-friendly image such as `edoburu/pgbouncer`).
+
+## Helm chart layout — `deploy/chart/jobprocessor/`
+
+- `templates/`
+  - `api-*`: Deployment, Service, Route
+  - `worker-*`: Deployment; KEDA `ScaledObject` behind `keda.enabled`
+  - `ticker-*`: Deployment, 1 replica
+  - `postgres-*`, `redis-*`: StatefulSets + Services annotated
+    `service.beta.openshift.io/serving-cert-secret-name`
+  - `pgbouncer-*`: Deployment + Service
+  - `migrate-job.yaml`, `users-sync-job.yaml`: Helm hook Jobs
+    (`pre-install,pre-upgrade`, `backoffLimit: 2`) replacing Compose `depends_on`
+  - `networkpolicies.yaml`
+  - `otel-collector-cr.yaml`: `OpenTelemetryCollector` CR behind `otel.enabled`
+  - Secrets/ConfigMaps (passwords, service-CA bundle, app config)
+- `values.yaml`: image repo/tag, resources, replica counts, `worker.maxRssMb`,
+  PgBouncer connection-math knobs, `keda.enabled`, `otel.enabled`, TLS toggles.
+- `deploy/openshift/bootstrap.sh`: installs KEDA (Custom Metrics Autoscaler
+  operator) and the Red Hat build of OpenTelemetry via OLM Subscriptions and waits
+  for their CRDs. Run once per cluster; documented in the chart README.
+
+## TLS
+
+- **Postgres**: serving-cert secret mounted; `ssl = on` via mounted config
+  fragment. PgBouncer connects with `server_tls_sslmode = verify-full`.
+- **Redis**: `tls-port 6379`, `port 0` (TLS-only), `tls-auth-clients no`
+  (server authentication only).
+- **PgBouncer**: also presents a serving cert; apps→PgBouncer TLS is on by default
+  and toggleable via values.
+- **Clients**: the service CA is injected into a ConfigMap annotated
+  `service.beta.openshift.io/inject-cabundle=true` and mounted at
+  `/etc/pki/service-ca/ca.crt`. `DATABASE_URL` gains
+  `?sslmode=verify-full&sslrootcert=/etc/pki/service-ca/ca.crt`; `REDIS_URL`
+  becomes `rediss://…` with the same CA.
+- **Rotation**: serving certs auto-rotate; clients re-verify on reconnect against
+  the mounted CA bundle — no action needed.
+
+## Secrets
+
+- DB and Redis passwords are chart-managed Kubernetes Secrets sourced from values.
+- `api_user_keys.json` becomes a Secret mounted into the users-sync hook Job at
+  the same path contract as Compose.
+
+## App code changes
+
+1. **Config** (`app/core/config.py`): additive only — TLS behavior comes through
+   the connection URLs; add CA-path settings only if a client library requires
+   them outside the URL.
+2. **Memory-based worker recycling** (new module under `app/worker/`): a periodic
+   task reads RSS from `/proc/self/status` (no new dependency) and compares it to
+   `WORKER_MAX_RSS_MB`. On breach: stop claiming new jobs, flip readiness to
+   not-ready, let the current TaskGroup drain via the existing graceful-shutdown
+   path, exit 0. The Deployment controller replaces the pod. Emits a
+   `worker.recycles` counter and logs through `app.worker` with bound context.
+   Drain is bounded by `terminationGracePeriodSeconds: 50`.
+3. **Probes**: reuse existing `/health` and `/ready` endpoints
+   (`app/core/healthcheck.py`) as liveness/readiness probes for api and the
+   worker/ticker health ports.
+
+## PgBouncer + KEDA connection math
+
+- PgBouncer runs in **transaction pooling** mode.
+- Values expose `postgres.maxConnections`, `pgbouncer.defaultPoolSize`,
+  `pgbouncer.maxClientConn`, and per-service SQLAlchemy pool sizes.
+- `_helpers.tpl` **fails at template time** if either constraint is violated:
+  1. `keda.maxReplicas × worker.dbPoolSize + api.replicas × api.dbPoolSize +
+     ticker.dbPoolSize > pgbouncer.maxClientConn`
+  2. `pgbouncer.defaultPoolSize × (databases × users) >
+     postgres.maxConnections − reservedConnections`
+- The chart README documents a worked example with the shipped defaults.
+- **KEDA `ScaledObject`** targets the worker Deployment: `redis-streams` scaler on
+  consumer-group lag, `minReplicas: 1`, `maxReplicas` from values (validated by
+  the math above), TLS parameters set for `rediss`.
+
+## Observability
+
+- Bootstrap installs the Red Hat build of OpenTelemetry operator.
+- The chart ships an `OpenTelemetryCollector` CR (deployment mode) behind
+  `otel.enabled`, reusing the pipeline shape of `otel-collector-config.yaml`
+  (OTLP in; debug exporters on CRC; exporter endpoint overridable via values).
+- Apps keep the `OTEL_EXPORTER_OTLP_ENDPOINT` contract, pointed at the
+  operator-managed collector Service.
+
+## Failure modes
+
+- Migration hook Job fails → install/upgrade aborts before app pods roll.
+- Recycler drain overrun → pod killed at grace-period expiry; Redis Streams
+  pending-entry reclaim (existing failure-handling design) recovers the job.
+- Operators absent but flags enabled → CR apply fails visibly at install; with
+  flags off the chart installs standalone.
+
+## Verification
+
+Config/infra is verified manually, not via pytest (per project convention):
+
+1. `helm lint` and `helm template` snapshot checks (including template-time
+   failure of bad connection math).
+2. On CRC: run bootstrap → `helm install` → all pods Ready.
+3. TLS: confirm Postgres/Redis reject plaintext; clients connect with
+   `verify-full`/`rediss`.
+4. NetworkPolicy: from a scratch pod, confirm direct access to postgres/redis is
+   denied while api is reachable only via the Route.
+5. End-to-end: submit jobs over HTTPS through the Route; observe completion.
+6. Recycling: lower `WORKER_MAX_RSS_MB`, drive load, watch the worker drain,
+   exit, and be replaced.
+7. Scaling: pump the queue, watch KEDA scale workers up to (not past)
+   `maxReplicas`, then back down.
+
+The memory-recycler **app code** gets pytest coverage (threshold breach → drain →
+exit; readiness flip), run via `uv run pytest`.
+
+## Out of scope
+
+- Changes to the Docker Compose stack (TLS/gateway there deferred).
+- Multi-namespace or production cluster concerns (image registries, quotas).
+- Client-certificate (mTLS) authentication to Redis/Postgres.
