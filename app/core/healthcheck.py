@@ -1,5 +1,6 @@
 import asyncio
 import socket
+import sys
 import time
 
 import redis.asyncio as redis
@@ -111,12 +112,28 @@ class HealthServer:
         # instead of storing it as a normal task result, which tears through
         # the event loop instead of giving the caller a catchable exception.
         # Binding here means a port conflict raises a plain OSError right here.
-        # Deliberately do NOT set SO_REUSEADDR: on Windows it lets a second
-        # socket bind to a port a live listener already holds (unlike on
-        # Linux, where it only affects TIME_WAIT reuse), which would silently
-        # defeat the port-conflict detection this fix exists to provide.
+        #
+        # SO_REUSEADDR is set on every POSIX platform to match uvicorn/asyncio's
+        # own default bind path (loop.create_server without a pre-made sock=
+        # sets it automatically) — without it, a socket lingering in TIME_WAIT
+        # after an orchestrator-triggered restart (see class docstring) would
+        # spuriously raise "Address already in use" on Linux, a regression
+        # relative to the pre-cff49a3 behavior this fix is supposed to preserve.
+        #
+        # It is deliberately skipped on Windows: Windows' SO_REUSEADDR has
+        # looser semantics than POSIX (it can let a second socket bind to a
+        # port a live listener already holds, not just one in TIME_WAIT),
+        # which would silently defeat the port-conflict detection this fix
+        # exists to provide, and would break
+        # test_start_raises_cleanly_on_port_conflict on this platform.
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(("0.0.0.0", self.port))
+        try:
+            if sys.platform != "win32":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("0.0.0.0", self.port))
+        except BaseException:
+            sock.close()
+            raise
         sock.listen(_LISTEN_BACKLOG)
         sock.setblocking(False)
         self.port = sock.getsockname()[1]
