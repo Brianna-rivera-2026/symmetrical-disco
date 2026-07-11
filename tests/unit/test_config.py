@@ -84,7 +84,6 @@ def test_failure_handling_defaults():
     assert s.reaper_batch_size == 100
     assert s.max_attempts == 4
     assert s.retry_backoff_schedule == [0, 30, 120]
-    assert s.max_handler_timeouts_before_recycle == 1
 
 
 def test_timeout_invariant_rejects_handler_ge_visibility():
@@ -98,3 +97,11 @@ def test_timeout_invariant_rejects_handler_ge_visibility():
             job_handler_timeout_s=60.0,
             visibility_timeout_s=60.0,
         )
+
+
+def test_worker_concurrency_default_and_env(monkeypatch):
+    s = Settings(database_url="postgresql+psycopg://x/y", redis_url="redis://x")
+    assert s.worker_concurrency == 10
+    monkeypatch.setenv("WORKER_CONCURRENCY", "3")
+    s2 = Settings(database_url="postgresql+psycopg://x/y", redis_url="redis://x")
+    assert s2.worker_concurrency == 3

@@ -1,22 +1,35 @@
-import time
+import asyncio
 
 import pytest
 
 from app.worker.timeout import HandlerTimeout, run_with_timeout
 
 
-def test_returns_value_when_fast():
-    assert run_with_timeout(lambda: 21 * 2, timeout_s=1.0) == 42
+async def test_returns_value_when_fast():
+    async def fast():
+        return 21 * 2
+
+    assert await run_with_timeout(fast(), timeout_s=1.0) == 42
 
 
-def test_raises_handler_timeout_when_slow():
+async def test_raises_handler_timeout_and_cancels_when_slow():
+    cancelled = asyncio.Event()
+
+    async def slow():
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
     with pytest.raises(HandlerTimeout):
-        run_with_timeout(lambda: time.sleep(1.0), timeout_s=0.05)
+        await run_with_timeout(slow(), timeout_s=0.05)
+    assert cancelled.is_set()
 
 
-def test_propagates_handler_exception():
-    def boom():
+async def test_propagates_handler_exception():
+    async def boom():
         raise ValueError("nope")
 
     with pytest.raises(ValueError):
-        run_with_timeout(boom, timeout_s=1.0)
+        await run_with_timeout(boom(), timeout_s=1.0)

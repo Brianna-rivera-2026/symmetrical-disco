@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import signal
 import time
@@ -5,11 +6,14 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-import redis
+import redis as sync_redis
+import redis.asyncio as redis
 from opentelemetry import metrics, trace
 from opentelemetry.metrics import Observation
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session, sessionmaker
 
 from app import repository as repo
 from app.core import metrics as app_metrics
@@ -18,6 +22,7 @@ from app.core.db import make_engine, make_session_factory
 from app.core.healthcheck import Heartbeat, HealthServer, ticker_heartbeat_threshold_s
 from app.core.redis import create_redis_client
 from app.core.telemetry import configure_telemetry, shutdown_telemetry
+from app.models.job import Job
 from app.observability import zero_fill_status_counts
 from app.queue import delayed
 from app.queue.consumer import REAPER_NAME, ensure_group
@@ -30,9 +35,9 @@ log = logging.getLogger("app.ticker")
 _tracer = trace.get_tracer("app.ticker")
 
 
-def promote_due(session: Session, client: redis.Redis, settings: Settings) -> int:
+async def promote_due(session: AsyncSession, client: redis.Redis, settings: Settings) -> int:
     now_epoch = time.time()
-    ids = delayed.due_job_ids(
+    ids = await delayed.due_job_ids(
         client, settings.delayed_zset, now_epoch, settings.ticker_batch_size
     )
     if not ids:
@@ -40,7 +45,7 @@ def promote_due(session: Session, client: redis.Redis, settings: Settings) -> in
     with _tracer.start_as_current_span(
         "ticker.promote", attributes={"jobs.count": len(ids)}
     ):
-        info = repo.get_promotion_info(session, [UUID(i) for i in ids])
+        info = await repo.get_promotion_info(session, [UUID(i) for i in ids])
         routed: list[tuple[str, dict]] = []
         for i in ids:
             meta = info.get(UUID(i))
@@ -51,18 +56,20 @@ def promote_due(session: Session, client: redis.Redis, settings: Settings) -> in
             priority, carrier = meta
             stream = settings.stream_for_priority(priority)
             routed.append((stream, message_fields(stream, i, carrier)))
-        delayed.promote(client, settings.delayed_zset, routed, ids)
-        repo.promote_scheduled_to_pending(session, [UUID(i) for i in ids])
+        await delayed.promote(client, settings.delayed_zset, routed, ids)
+        await repo.promote_scheduled_to_pending(session, [UUID(i) for i in ids])
         app_metrics.ticker_promoted.add(len(routed))
         log.info("ticker.promoted", extra={"enqueued": len(routed), "pulled": len(ids)})
     return len(ids)
 
 
-def reconcile_orphans(session: Session, client: redis.Redis, settings: Settings) -> int:
+async def reconcile_orphans(
+    session: AsyncSession, client: redis.Redis, settings: Settings
+) -> int:
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.reconcile_grace_s)
     total = 0
     while True:
-        rows = repo.list_unsynced(
+        rows = await repo.list_unsynced(
             session, older_than=cutoff, limit=settings.reconcile_batch_size
         )
         if not rows:
@@ -78,20 +85,20 @@ def reconcile_orphans(session: Session, client: redis.Redis, settings: Settings)
                             extra={"job_id": str(job.id)},
                         )
                         continue
-                    delayed.schedule(
+                    await delayed.schedule(
                         client,
                         settings.delayed_zset,
                         str(job.id),
                         job.scheduled_at.timestamp(),
                     )
                 else:
-                    enqueue(
+                    await enqueue(
                         client,
                         settings.stream_for_priority(job.priority),
                         str(job.id),
                         carrier=job.trace_context,
                     )
-                repo.mark_synced(session, job.id)
+                await repo.mark_synced(session, job.id)
                 total += 1
         if len(rows) < settings.reconcile_batch_size:
             break
@@ -100,13 +107,13 @@ def reconcile_orphans(session: Session, client: redis.Redis, settings: Settings)
     return total
 
 
-def _reap_one(session, client, settings, stream, message_id, job_id) -> None:
-    job = repo.get_job(session, job_id)
+async def _reap_one(session, client, settings, stream, message_id, job_id) -> None:
+    job = await repo.get_job(session, job_id)
     if job is not None:
         if job.status in (JobStatus.completed, JobStatus.failed, JobStatus.cancelled):
             pass  # ghost: terminal status, no Redis handoff needed
         elif job.status is JobStatus.processing:
-            schedule_retry_or_fail(
+            await schedule_retry_or_fail(
                 session,
                 client,
                 settings,
@@ -118,36 +125,36 @@ def _reap_one(session, client, settings, stream, message_id, job_id) -> None:
             # Worker won the guard then died before the Redis handoff → finish it
             # inline (immediate recovery). Do NOT touch attempts / re-decide.
             if job.status is JobStatus.scheduled and job.scheduled_at is not None:
-                delayed.schedule(
+                await delayed.schedule(
                     client,
                     settings.delayed_zset,
                     str(job.id),
                     job.scheduled_at.timestamp(),
                 )
             else:
-                enqueue(
+                await enqueue(
                     client,
                     settings.stream_for_priority(job.priority),
                     str(job.id),
                     carrier=job.trace_context,
                 )
-            repo.mark_synced(session, job.id)
+            await repo.mark_synced(session, job.id)
         # else: pending/scheduled + synced=True → fresh message already live
     # Always clear the reclaimed entry from the PEL.
-    client.xack(stream, settings.consumer_group, message_id)
+    await client.xack(stream, settings.consumer_group, message_id)
 
 
-def reap_stale(session: Session, client: redis.Redis, settings: Settings) -> int:
+async def reap_stale(session: AsyncSession, client: redis.Redis, settings: Settings) -> int:
     min_idle = int(settings.visibility_timeout_s * 1000)
     handled = 0
     for stream in settings.ordered_streams:
         # XAUTOCLAIM raises NOGROUP against a stream/group that doesn't exist
         # yet; guard it the same way every other consumer-group reader in this
         # codebase does (main.py, worker/runner.py, run_forever's own startup).
-        ensure_group(client, stream, settings.consumer_group)
+        await ensure_group(client, stream, settings.consumer_group)
         cursor = "0-0"
         while True:
-            resp = client.xautoclaim(
+            resp = await client.xautoclaim(
                 name=stream,
                 groupname=settings.consumer_group,
                 consumername=REAPER_NAME,
@@ -161,7 +168,7 @@ def reap_stale(session: Session, client: redis.Redis, settings: Settings) -> int
                     "ticker.reap", attributes={"jobs.count": len(messages)}
                 ):
                     for message_id, fields in messages:
-                        _reap_one(
+                        await _reap_one(
                             session,
                             client,
                             settings,
@@ -179,7 +186,7 @@ def reap_stale(session: Session, client: redis.Redis, settings: Settings) -> int
 
 
 def queue_depth_observations(
-    client: redis.Redis, settings: Settings
+    client: sync_redis.Redis, settings: Settings
 ) -> list[Observation]:
     """Consumer-group lag per stream (same source as /stats). Errors yield no
     observations — a metrics callback must never raise."""
@@ -188,7 +195,7 @@ def queue_depth_observations(
         for priority, stream in settings.priority_streams:
             try:
                 groups = client.xinfo_groups(stream)
-            except redis.ResponseError:
+            except sync_redis.ResponseError:
                 continue  # stream/group not created yet
             group = next(
                 (g for g in groups if g.get("name") == settings.consumer_group),
@@ -196,17 +203,17 @@ def queue_depth_observations(
             )
             if group is not None and group.get("lag") is not None:
                 out.append(Observation(int(group["lag"]), {"stream": priority.value}))
-    except redis.RedisError:
+    except sync_redis.RedisError:
         return []
     return out
 
 
 def queue_scheduled_observations(
-    client: redis.Redis, settings: Settings
+    client: sync_redis.Redis, settings: Settings
 ) -> list[Observation]:
     try:
         return [Observation(int(client.zcard(settings.delayed_zset)))]
-    except redis.RedisError:
+    except sync_redis.RedisError:
         return []
 
 
@@ -215,10 +222,15 @@ def job_status_observations(
 ) -> list[Observation]:
     """Postgres queue saturation: job counts by status, zero-filled so every
     status is always reported. Errors yield no observations — a metrics
-    callback must never raise."""
+    callback must never raise.
+
+    Queries directly (not via `app.repository`, which is async-only) since
+    this runs on the dedicated sync observability session factory."""
     try:
         with session_factory() as session:
-            rows = repo.count_by_status(session)
+            rows = session.execute(
+                select(Job.status, func.count()).group_by(Job.status)
+            ).all()
     except SQLAlchemyError:
         return []
     counts = zero_fill_status_counts(rows)
@@ -226,7 +238,7 @@ def job_status_observations(
 
 
 def register_ticker_gauges(
-    client: redis.Redis, session_factory: Callable[[], Session], settings: Settings
+    client: sync_redis.Redis, session_factory: Callable[[], Session], settings: Settings
 ) -> None:
     meter = metrics.get_meter("app.ticker")
     meter.create_observable_gauge(
@@ -246,7 +258,23 @@ def register_ticker_gauges(
     )
 
 
-def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -> None:
+def _make_sync_observability_resources(settings: Settings):
+    """Gauge callbacks run on the OTel exporter thread and cannot await; give
+    them their own tiny sync engine/client, used for nothing else."""
+    engine = create_engine(
+        settings.database_url, pool_pre_ping=True, pool_timeout=5, pool_size=1
+    )
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    client = sync_redis.Redis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        socket_connect_timeout=5,
+        socket_timeout=10,
+    )
+    return engine, factory, client
+
+
+async def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -> None:
     configure_telemetry(settings, "jobs-ticker")
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
@@ -264,15 +292,20 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
             engine=engine,
             redis_client=client,
         )
-        health_server.start()
+        await health_server.start()
 
     # Make sure the consumer group exists before we XADD, so workers created
     # later (group id "$") don't miss jobs the ticker has already promoted.
     for stream in settings.ordered_streams:
-        ensure_group(client, stream, settings.consumer_group)
+        await ensure_group(client, stream, settings.consumer_group)
 
+    sync_engine = None
+    sync_client = None
     if settings.otel_enabled:
-        register_ticker_gauges(client, session_factory, settings)
+        sync_engine, sync_factory, sync_client = _make_sync_observability_resources(
+            settings
+        )
+        register_ticker_gauges(sync_client, sync_factory, settings)
 
     shutting_down = {"flag": False}
 
@@ -295,30 +328,34 @@ def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -
     while not _should_stop():
         heartbeat.beat()
         try:
-            with session_factory() as session:
-                promoted = promote_due(session, client, settings)
+            async with session_factory() as session:
+                promoted = await promote_due(session, client, settings)
             now = time.time()
             if now - last_reconcile >= settings.reconcile_interval_s:
-                with session_factory() as session:
-                    recovered = reconcile_orphans(session, client, settings)
+                async with session_factory() as session:
+                    recovered = await reconcile_orphans(session, client, settings)
                 last_reconcile = now
                 if recovered:
                     log.info("ticker.reconciled", extra={"count": recovered})
             if now - last_reap >= settings.reaper_interval_s:
-                with session_factory() as session:
-                    reap_stale(session, client, settings)
+                async with session_factory() as session:
+                    await reap_stale(session, client, settings)
                 last_reap = now
             # Full batch → drain immediately without sleeping
             if promoted >= settings.ticker_batch_size:
                 continue
-            time.sleep(settings.ticker_interval_s)
+            await asyncio.sleep(settings.ticker_interval_s)
         except Exception:  # noqa: BLE001
             log.exception("ticker.tick_failed")
-            time.sleep(settings.ticker_interval_s)
+            await asyncio.sleep(settings.ticker_interval_s)
 
     log.info("ticker.stopped")
     if health_server is not None:
-        health_server.stop()
+        await health_server.stop()
     shutdown_telemetry()
-    client.close()
-    engine.dispose()
+    await client.aclose()
+    await engine.dispose()
+    if sync_client is not None:
+        sync_client.close()
+    if sync_engine is not None:
+        sync_engine.dispose()

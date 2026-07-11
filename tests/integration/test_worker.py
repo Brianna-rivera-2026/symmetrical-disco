@@ -1,4 +1,4 @@
-import time
+import asyncio
 
 import pytest
 from opentelemetry import trace
@@ -7,92 +7,164 @@ from opentelemetry.trace import SpanKind, StatusCode
 from app import repository as repo
 from app.core.db import make_session_factory
 from app.jobs import handlers
+import app.jobs.registry as registry
 from app.queue.consumer import ensure_group, read_priority
 from app.queue.producer import enqueue
 from app.schemas.enums import JobPriority, JobStatus, JobType
 from app.worker.runner import cpu_utilization_observations, handle_message, process_job
 
-# handlers.time is the real stdlib `time` module (not a wrapper), so patching
-# handlers.time.sleep patches time.sleep globally. Capture the genuine
-# implementation now, before any fixture monkeypatches it, so tests that need
-# a real (slow) sleep don't recurse into their own patched no-op.
-_real_sleep = time.sleep
+# Capture the genuine asyncio.sleep now, before any fixture monkeypatches
+# handlers.asyncio.sleep, so tests that need a real (slow) sleep don't
+# recurse into their own patched no-op.
+_real_sleep = asyncio.sleep
 
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
-    monkeypatch.setattr(handlers.time, "sleep", lambda *_: None)
+    async def _instant(*_a, **_kw):
+        return None
+
+    monkeypatch.setattr(handlers.asyncio, "sleep", _instant)
 
 
-def test_process_job_completes_email(db_session, redis_client, test_settings, owner_id):
-    job = repo.create_job(
+async def test_process_job_completes_email(
+    db_session, redis_client, test_settings, owner_id
+):
+    job = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
     )
-    outcome = process_job(db_session, redis_client, test_settings, job.id)
+    outcome = await process_job(db_session, redis_client, test_settings, job.id)
     assert outcome.label == "completed"
     assert outcome.ack is True
-    db_session.refresh(job)
+    await db_session.refresh(job)
     assert job.status is JobStatus.completed
     assert job.attempts == 1
 
 
-def test_process_job_retries_on_handler_failure(
+async def test_process_job_retries_on_handler_failure(
     db_session, redis_client, test_settings, monkeypatch, owner_id
 ):
     monkeypatch.setattr(handlers.random, "random", lambda: 0.05)  # force webhook fail
-    job = repo.create_job(
+    job = await repo.create_job(
         db_session, JobType.webhook, {"url": "https://x.test"}, user_id=owner_id
     )
-    outcome = process_job(db_session, redis_client, test_settings, job.id)
+    outcome = await process_job(db_session, redis_client, test_settings, job.id)
     assert outcome.label == "retried"
-    db_session.refresh(job)
+    await db_session.refresh(job)
     assert job.status is JobStatus.pending  # immediate retry re-enqueued
     assert job.attempts == 1
-    assert redis_client.xlen(test_settings.stream_normal) == 1
+    assert await redis_client.xlen(test_settings.stream_normal) == 1
 
 
-def test_process_job_permanent_fail_when_attempts_exhausted(
+async def test_process_job_permanent_fail_when_attempts_exhausted(
     db_session, redis_client, test_settings, monkeypatch, owner_id
 ):
     monkeypatch.setattr(handlers.random, "random", lambda: 0.05)
-    job = repo.create_job(
+    job = await repo.create_job(
         db_session,
         JobType.webhook,
         {"url": "https://x.test"},
         max_attempts=1,
         user_id=owner_id,
     )
-    outcome = process_job(db_session, redis_client, test_settings, job.id)
+    outcome = await process_job(db_session, redis_client, test_settings, job.id)
     assert outcome.ack is True
-    db_session.refresh(job)
+    await db_session.refresh(job)
     assert job.status is JobStatus.failed
 
 
-def test_process_job_skips_unclaimable(db_session, redis_client, test_settings):
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
-    repo.claim_job(db_session, job.id)
-    repo.complete_job(db_session, job.id, {"message_id": "m1"})  # already terminal
-    outcome = process_job(db_session, redis_client, test_settings, job.id)
+async def test_process_job_skips_unclaimable(
+    db_session, redis_client, test_settings, owner_id
+):
+    job = await repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
+    )
+    await repo.claim_job(db_session, job.id)
+    await repo.complete_job(
+        db_session, job.id, {"message_id": "m1"}
+    )  # already terminal
+    outcome = await process_job(db_session, redis_client, test_settings, job.id)
     assert outcome.label == "skipped"
     assert outcome.ack is True
 
 
-def test_process_job_timeout_recycles(
+async def test_process_job_timeout_then_worker_continues(
     db_session, redis_client, test_settings, monkeypatch, owner_id
 ):
     settings = test_settings.model_copy(update={"job_handler_timeout_s": 0.05})
-    monkeypatch.setattr(handlers.time, "sleep", lambda *_: _real_sleep(0.5))
-    job = repo.create_job(
+
+    async def _slow(*_a, **_kw):
+        await _real_sleep(0.5)
+
+    monkeypatch.setattr(handlers.asyncio, "sleep", _slow)
+    job = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
     )
-    outcome = process_job(db_session, redis_client, settings, job.id)
-    assert outcome.recycle is True
-    db_session.refresh(job)
+    outcome = await process_job(db_session, redis_client, settings, job.id)
+    assert outcome.label == "timeout"
+    await db_session.refresh(job)
     assert job.status is JobStatus.pending  # timeout → immediate retry
     assert job.attempts == 1
 
+    # Worker keeps running after a timeout: process the retried job (no sleep
+    # patched back in, so this attempt completes normally).
+    async def _instant(*_a, **_kw):
+        return None
 
-def test_run_forever_processes_one_then_stops(
+    monkeypatch.setattr(handlers.asyncio, "sleep", _instant)
+    outcome2 = await process_job(db_session, redis_client, settings, job.id)
+    assert outcome2.label == "completed"
+
+
+async def test_process_job_timeout_survives_full_expiration_on_rollback(
+    db_session, redis_client, test_settings, monkeypatch, owner_id
+):
+    """Regression test for a MissingGreenlet crash found in Docker verification.
+
+    session.rollback() expires every ORM attribute on objects loaded in the
+    session (independent of expire_on_commit). The HandlerTimeout branch of
+    process_job used to keep referencing the pre-rollback `job` ORM object
+    afterward; `schedule_retry_or_fail`'s plain (un-awaited) `job.attempts`
+    access then tried to lazy-load the expired attribute, which requires an
+    active SQLAlchemy async-greenlet bridge that a bare attribute access
+    doesn't have — raising `sqlalchemy.exc.MissingGreenlet` and crashing the
+    whole worker TaskGroup. Whether the ORM happens to still have unexpired
+    attributes cached at that point is timing/connection-pool sensitive,
+    which is why the plain existing timeout test didn't reliably catch this.
+    This test forces the worst case directly with session.expire_all()
+    monkeypatched onto rollback, so it fails deterministically without the
+    fix and passes deterministically with it.
+    """
+    settings = test_settings.model_copy(update={"job_handler_timeout_s": 0.05})
+
+    async def _slow(*_a, **_kw):
+        await _real_sleep(0.5)
+
+    monkeypatch.setattr(handlers.asyncio, "sleep", _slow)
+
+    real_rollback = db_session.rollback
+
+    async def _rollback_and_expire_everything():
+        await real_rollback()
+        db_session.expire_all()  # force worst-case expiration of every object
+
+    monkeypatch.setattr(db_session, "rollback", _rollback_and_expire_everything)
+
+    job = await repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
+    )
+
+    # Must not raise sqlalchemy.exc.MissingGreenlet (or anything else).
+    outcome = await process_job(db_session, redis_client, settings, job.id)
+
+    assert outcome.label == "timeout"
+    assert outcome.ack is True
+    await db_session.refresh(job)
+    assert job.status is JobStatus.pending
+    assert job.attempts == 1
+
+
+async def test_run_forever_processes_one_then_stops(
     test_settings, redis_client, pg_engine, owner_id
 ):
     from app.core.db import make_session_factory
@@ -101,13 +173,13 @@ def test_run_forever_processes_one_then_stops(
     from app.worker.runner import run_forever
 
     for stream in test_settings.ordered_streams:
-        ensure_group(redis_client, stream, test_settings.consumer_group)
+        await ensure_group(redis_client, stream, test_settings.consumer_group)
     factory = make_session_factory(pg_engine)
-    with factory() as s:
-        job = repo.create_job(
+    async with factory() as s:
+        job = await repo.create_job(
             s, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
         )
-    enqueue(redis_client, test_settings.stream_normal, str(job.id))
+    await enqueue(redis_client, test_settings.stream_normal, str(job.id))
 
     calls = {"n": 0}
 
@@ -117,12 +189,12 @@ def test_run_forever_processes_one_then_stops(
         calls["n"] += 1
         return False
 
-    assert run_forever(test_settings, stop=stop) == 0
-    with factory() as s:
-        assert repo.get_job(s, job.id).status is JobStatus.completed
+    assert await run_forever(test_settings, stop=stop) == 0
+    async with factory() as s:
+        assert (await repo.get_job(s, job.id)).status is JobStatus.completed
 
 
-def test_run_forever_drains_high_before_low(
+async def test_run_forever_drains_high_before_low(
     test_settings, redis_client, pg_engine, owner_id
 ):
     from app.core.db import make_session_factory
@@ -131,25 +203,25 @@ def test_run_forever_drains_high_before_low(
     from app.worker.runner import run_forever
 
     for stream in test_settings.ordered_streams:
-        ensure_group(redis_client, stream, test_settings.consumer_group)
+        await ensure_group(redis_client, stream, test_settings.consumer_group)
     factory = make_session_factory(pg_engine)
-    with factory() as s:
-        low = repo.create_job(
+    async with factory() as s:
+        low = await repo.create_job(
             s,
             JobType.email,
             {"to": "a@b.com", "subject": "Hi"},
             priority=JobPriority.low,
             user_id=owner_id,
         )
-        high = repo.create_job(
+        high = await repo.create_job(
             s,
             JobType.email,
             {"to": "a@b.com", "subject": "Hi"},
             priority=JobPriority.high,
             user_id=owner_id,
         )
-    enqueue(redis_client, test_settings.stream_low, str(low.id))
-    enqueue(redis_client, test_settings.stream_high, str(high.id))
+    await enqueue(redis_client, test_settings.stream_low, str(low.id))
+    await enqueue(redis_client, test_settings.stream_high, str(high.id))
 
     calls = {"n": 0}
 
@@ -159,45 +231,108 @@ def test_run_forever_drains_high_before_low(
         calls["n"] += 1
         return False
 
-    run_forever(test_settings, stop=stop)
-    with factory() as s:
-        assert repo.get_job(s, high.id).status is JobStatus.completed
-        assert repo.get_job(s, low.id).status is JobStatus.pending
+    await run_forever(test_settings, stop=stop)
+    async with factory() as s:
+        assert (await repo.get_job(s, high.id)).status is JobStatus.completed
+        assert (await repo.get_job(s, low.id)).status is JobStatus.pending
     assert (
-        redis_client.xpending(test_settings.stream_high, test_settings.consumer_group)[
-            "pending"
+        await redis_client.xpending(
+            test_settings.stream_high, test_settings.consumer_group
+        )
+    )["pending"] == 0
+    assert await redis_client.xlen(test_settings.stream_low) == 1
+
+
+async def test_jobs_run_concurrently(
+    test_settings, pg_engine, redis_client, owner_id, monkeypatch
+):
+    """With concurrency N, two slow jobs overlap instead of running serially."""
+    running = 0
+    peak = 0
+
+    async def slow_handler(payload, ctx):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await _real_sleep(
+            0.3
+        )  # real sleep: the autouse fixture patches asyncio.sleep to a no-op
+        running -= 1
+        return {"ok": True}
+
+    monkeypatch.setitem(registry.HANDLERS, JobType.email, slow_handler)
+    for stream in test_settings.ordered_streams:
+        await ensure_group(redis_client, stream, test_settings.consumer_group)
+    factory = make_session_factory(pg_engine)
+    async with factory() as session:
+        jobs = [
+            await repo.create_job(
+                session,
+                JobType.email,
+                {"to": "a@b.c", "subject": "s", "body": "b"},
+                user_id=owner_id,
+            )
+            for _ in range(2)
         ]
-        == 0
+    for job in jobs:
+        await enqueue(
+            redis_client, test_settings.stream_for_priority(job.priority), str(job.id)
+        )
+
+    settings = test_settings.model_copy(
+        update={"worker_concurrency": 2, "block_ms": 100}
     )
-    assert redis_client.xlen(test_settings.stream_low) == 1
+    processed = {"n": 0}
+
+    async def _poll_done() -> bool:
+        async with factory() as session:
+            done = [
+                (await repo.get_job(session, j.id)).status is JobStatus.completed
+                for j in jobs
+            ]
+        processed["n"] = sum(done)
+        return all(done)
+
+    stop_flag = {"stop": False}
+    from app.worker.runner import run_forever
+
+    worker = asyncio.create_task(run_forever(settings, stop=lambda: stop_flag["stop"]))
+    try:
+        async with asyncio.timeout(15):
+            while not await _poll_done():
+                await _real_sleep(0.05)
+    finally:
+        stop_flag["stop"] = True
+        await worker
+    assert peak == 2
 
 
 def _read_one(redis_client, test_settings):
-    batch = read_priority(
+    return read_priority(
         redis_client,
         test_settings.ordered_streams,
         test_settings.consumer_group,
         "test-consumer",
         block_ms=100,
     )
-    assert batch, "expected one message"
-    return batch[0]
 
 
-def test_consumer_span_joins_producer_trace(
+async def test_consumer_span_joins_producer_trace(
     db_session, redis_client, test_settings, pg_engine, span_exporter, owner_id
 ):
     for stream in test_settings.ordered_streams:
-        ensure_group(redis_client, stream, test_settings.consumer_group)
-    job = repo.create_job(
+        await ensure_group(redis_client, stream, test_settings.consumer_group)
+    job = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
     )
     tracer = trace.get_tracer("test")
     with tracer.start_as_current_span("submit") as submit_span:
-        enqueue(redis_client, test_settings.stream_normal, str(job.id))
-    stream, message_id, fields = _read_one(redis_client, test_settings)
+        await enqueue(redis_client, test_settings.stream_normal, str(job.id))
+    batch = await _read_one(redis_client, test_settings)
+    assert batch, "expected one message"
+    stream, message_id, fields = batch[0]
 
-    outcome = handle_message(
+    outcome = await handle_message(
         make_session_factory(pg_engine),
         redis_client,
         test_settings,
@@ -217,23 +352,25 @@ def test_consumer_span_joins_producer_trace(
     assert consumer.attributes["job.type"] == "email"
     assert consumer.attributes["job.attempt"] == 1
     # message acked: no pending entries left for the group
-    pending = redis_client.xpending(stream, test_settings.consumer_group)
+    pending = await redis_client.xpending(stream, test_settings.consumer_group)
     assert pending["pending"] == 0
 
 
-def test_consumer_span_without_traceparent_starts_new_trace(
+async def test_consumer_span_without_traceparent_starts_new_trace(
     db_session, redis_client, test_settings, pg_engine, span_exporter, owner_id
 ):
     for stream in test_settings.ordered_streams:
-        ensure_group(redis_client, stream, test_settings.consumer_group)
-    job = repo.create_job(
+        await ensure_group(redis_client, stream, test_settings.consumer_group)
+    job = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, user_id=owner_id
     )
-    redis_client.xadd(
+    await redis_client.xadd(
         test_settings.stream_normal, {"job_id": str(job.id)}
     )  # legacy shape
-    stream, message_id, fields = _read_one(redis_client, test_settings)
-    outcome = handle_message(
+    batch = await _read_one(redis_client, test_settings)
+    assert batch, "expected one message"
+    stream, message_id, fields = batch[0]
+    outcome = await handle_message(
         make_session_factory(pg_engine),
         redis_client,
         test_settings,
@@ -244,7 +381,7 @@ def test_consumer_span_without_traceparent_starts_new_trace(
     assert outcome.label == "completed"
 
 
-def test_consumer_span_records_handler_error(
+async def test_consumer_span_records_handler_error(
     db_session,
     redis_client,
     test_settings,
@@ -255,13 +392,15 @@ def test_consumer_span_records_handler_error(
 ):
     monkeypatch.setattr(handlers.random, "random", lambda: 0.05)  # force webhook fail
     for stream in test_settings.ordered_streams:
-        ensure_group(redis_client, stream, test_settings.consumer_group)
-    job = repo.create_job(
+        await ensure_group(redis_client, stream, test_settings.consumer_group)
+    job = await repo.create_job(
         db_session, JobType.webhook, {"url": "https://x.test"}, user_id=owner_id
     )
-    enqueue(redis_client, test_settings.stream_normal, str(job.id))
-    stream, message_id, fields = _read_one(redis_client, test_settings)
-    handle_message(
+    await enqueue(redis_client, test_settings.stream_normal, str(job.id))
+    batch = await _read_one(redis_client, test_settings)
+    assert batch, "expected one message"
+    stream, message_id, fields = batch[0]
+    await handle_message(
         make_session_factory(pg_engine),
         redis_client,
         test_settings,
@@ -284,36 +423,33 @@ def test_cpu_utilization_observations_returns_one_point():
     assert observations[0].value >= 0.0
 
 
-def test_ownerless_job_is_dropped_not_executed(
-    db_session, redis_client, test_settings, owner_id
+async def test_ownerless_job_is_dropped_not_executed(
+    db_session, redis_client, test_settings
 ):
-    from app.schemas.enums import JobStatus, JobType
-    from app.worker.runner import process_job
-
-    job = repo.create_job(
+    job = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "s"}
     )  # no user_id -> ownerless
+    job_id = job.id
 
-    outcome = process_job(db_session, redis_client, test_settings, job.id)
+    outcome = await process_job(db_session, redis_client, test_settings, job_id)
 
     assert outcome.label == "dropped_ownerless"
     assert outcome.ack is True
     db_session.expire_all()
-    refreshed = repo.get_job(db_session, job.id)
+    refreshed = await repo.get_job(db_session, job_id)
     assert refreshed.status is JobStatus.failed
     assert refreshed.error == {"reason": "ownerless job dropped"}
     assert refreshed.result is None  # handler never ran
 
 
-def test_owned_job_still_processes(db_session, redis_client, test_settings, owner_id):
-    from app.schemas.enums import JobType
-    from app.worker.runner import process_job
-
-    job = repo.create_job(
+async def test_owned_job_still_processes(
+    db_session, redis_client, test_settings, owner_id
+):
+    job = await repo.create_job(
         db_session,
         JobType.email,
         {"to": "a@b.com", "subject": "s"},
         user_id=owner_id,
     )
-    outcome = process_job(db_session, redis_client, test_settings, job.id)
+    outcome = await process_job(db_session, redis_client, test_settings, job.id)
     assert outcome.label == "completed"

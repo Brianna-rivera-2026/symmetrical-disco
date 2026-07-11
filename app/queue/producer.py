@@ -1,4 +1,4 @@
-import redis
+import redis.asyncio as redis
 from opentelemetry import trace
 from opentelemetry.propagate import extract, inject
 from opentelemetry.trace import SpanKind
@@ -29,7 +29,7 @@ def message_fields(
     return fields
 
 
-def enqueue(
+async def enqueue(
     client: redis.Redis, stream: str, job_id: str, carrier: dict | None = None
 ) -> str:
-    return client.xadd(stream, message_fields(stream, job_id, carrier))
+    return await client.xadd(stream, message_fields(stream, job_id, carrier))

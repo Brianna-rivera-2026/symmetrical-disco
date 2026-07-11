@@ -2,12 +2,12 @@ import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
-import redis
+import redis.asyncio as redis
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import repository as repo
 from app.api.deps import get_current_user, get_db, get_redis
@@ -42,11 +42,11 @@ def health() -> LivenessResponse:
 
 
 @router.get("/ready", response_model=HealthResponse)
-def ready(
-    session: Session = Depends(get_db),
+async def ready(
+    session: AsyncSession = Depends(get_db),
     client: redis.Redis = Depends(get_redis),
 ):
-    checks = check_readiness(session, client)
+    checks = await check_readiness(session, client)
     ok = all(value == "ok" for value in checks.values())
     if not ok:
         return JSONResponse(
@@ -57,23 +57,25 @@ def ready(
 
 
 @router.get("/stats", response_model=StatsResponse)
-def stats(
+async def stats(
     request: Request,
-    session: Session = Depends(get_db),
+    session: AsyncSession = Depends(get_db),
     client: redis.Redis = Depends(get_redis),
 ) -> StatsResponse:
     settings = request.app.state.settings
     try:
-        return gather_stats(session, client, settings)
+        return await gather_stats(session, client, settings)
     except (redis.RedisError, SQLAlchemyError) as exc:
         log.warning("stats.unavailable", extra={"error": str(exc)})
         raise HTTPException(status_code=503, detail="stats unavailable") from exc
 
 
-def _create_and_handoff(session, client, settings, submission, key, req_hash, user_id):
+async def _create_and_handoff(
+    session, client, settings, submission, key, req_hash, user_id
+):
     scheduled_at = submission.scheduled_at
     if scheduled_at is not None and scheduled_at > datetime.now(timezone.utc):
-        job = repo.create_job(
+        job = await repo.create_job(
             session,
             submission.type,
             submission.payload,
@@ -86,9 +88,11 @@ def _create_and_handoff(session, client, settings, submission, key, req_hash, us
             trace_context=current_trace_carrier(),
             user_id=user_id,
         )
-        schedule(client, settings.delayed_zset, str(job.id), scheduled_at.timestamp())
+        await schedule(
+            client, settings.delayed_zset, str(job.id), scheduled_at.timestamp()
+        )
     else:
-        job = repo.create_job(
+        job = await repo.create_job(
             session,
             submission.type,
             submission.payload,
@@ -99,8 +103,10 @@ def _create_and_handoff(session, client, settings, submission, key, req_hash, us
             trace_context=current_trace_carrier(),
             user_id=user_id,
         )
-        enqueue(client, settings.stream_for_priority(submission.priority), str(job.id))
-    repo.mark_synced(session, job.id)
+        await enqueue(
+            client, settings.stream_for_priority(submission.priority), str(job.id)
+        )
+    await repo.mark_synced(session, job.id)
     app_metrics.jobs_submitted.add(
         1,
         {
@@ -123,7 +129,7 @@ def _accepted(job) -> JobAccepted:
     )
 
 
-def _replay_or_conflict(existing, req_hash, response) -> JobAccepted:
+async def _replay_or_conflict(existing, req_hash, response) -> JobAccepted:
     if existing is not None and existing.idempotency_hash == req_hash:
         response.status_code = 200
         return _accepted(existing)
@@ -133,11 +139,11 @@ def _replay_or_conflict(existing, req_hash, response) -> JobAccepted:
 
 
 @router.post("/jobs", response_model=JobAccepted, status_code=202)
-def submit_job(
+async def submit_job(
     submission: JobSubmission,
     request: Request,
     response: Response,
-    session: Session = Depends(get_db),
+    session: AsyncSession = Depends(get_db),
     client: redis.Redis = Depends(get_redis),
     user: AuthedUser = Depends(get_current_user),
 ) -> JobAccepted:
@@ -149,80 +155,82 @@ def submit_job(
 
     key = submission.idempotency_key
     if key is None:
-        job = _create_and_handoff(
+        job = await _create_and_handoff(
             session, client, settings, submission, None, None, user.id
         )
         return _accepted(job)
 
     req_hash = canonical_hash(submission.type, submission.payload)
-    existing = repo.get_by_idempotency_key(session, key, user.id)
+    existing = await repo.get_by_idempotency_key(session, key, user.id)
     if existing is not None:
-        return _replay_or_conflict(existing, req_hash, response)
+        return await _replay_or_conflict(existing, req_hash, response)
     try:
-        job = _create_and_handoff(
+        job = await _create_and_handoff(
             session, client, settings, submission, key, req_hash, user.id
         )
     except IntegrityError:
-        session.rollback()
-        existing = repo.get_by_idempotency_key(session, key, user.id)
-        return _replay_or_conflict(existing, req_hash, response)
+        await session.rollback()
+        existing = await repo.get_by_idempotency_key(session, key, user.id)
+        return await _replay_or_conflict(existing, req_hash, response)
     return _accepted(job)
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut)
-def get_job(
+async def get_job(
     job_id: UUID,
-    session: Session = Depends(get_db),
+    session: AsyncSession = Depends(get_db),
     user: AuthedUser = Depends(get_current_user),
 ) -> JobOut:
-    job = repo.get_job(session, job_id, user_id=user.id)
+    job = await repo.get_job(session, job_id, user_id=user.id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     return JobOut.model_validate(job)
 
 
 @router.post("/jobs/{job_id}/retry", response_model=JobOut)
-def retry_job(
+async def retry_job(
     job_id: UUID,
     request: Request,
-    session: Session = Depends(get_db),
+    session: AsyncSession = Depends(get_db),
     client: redis.Redis = Depends(get_redis),
     user: AuthedUser = Depends(get_current_user),
 ) -> JobOut:
-    job = repo.get_job(session, job_id, user_id=user.id)
+    job = await repo.get_job(session, job_id, user_id=user.id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
-    if not repo.reset_failed_to_pending(session, job_id):
+    if not await repo.reset_failed_to_pending(session, job_id):
         raise HTTPException(
             status_code=409, detail="job is not in a terminal failed state"
         )
     settings = request.app.state.settings
-    enqueue(client, settings.stream_for_priority(job.priority), str(job_id))
-    repo.mark_synced(session, job_id)
-    session.refresh(job)
+    await enqueue(client, settings.stream_for_priority(job.priority), str(job_id))
+    await repo.mark_synced(session, job_id)
+    await session.refresh(job)
     return JobOut.model_validate(job)
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=JobOut)
-def cancel_job_route(
+async def cancel_job_route(
     job_id: UUID,
     request: Request,
     response: Response,
-    session: Session = Depends(get_db),
+    session: AsyncSession = Depends(get_db),
     client: redis.Redis = Depends(get_redis),
     user: AuthedUser = Depends(get_current_user),
 ) -> JobOut:
     settings = request.app.state.settings
-    if repo.get_job(session, job_id, user_id=user.id) is None:
+    if await repo.get_job(session, job_id, user_id=user.id) is None:
         raise HTTPException(status_code=404, detail="job not found")
     for _ in range(3):  # bounded re-resolve for the legal processing<->pending flap
-        if repo.cancel_pending_or_scheduled(session, job_id):
-            client.zrem(settings.delayed_zset, str(job_id))  # harmless no-op if absent
-            return JobOut.model_validate(repo.get_job(session, job_id))
-        if repo.request_cancel(session, job_id):
+        if await repo.cancel_pending_or_scheduled(session, job_id):
+            await client.zrem(
+                settings.delayed_zset, str(job_id)
+            )  # harmless no-op if absent
+            return JobOut.model_validate(await repo.get_job(session, job_id))
+        if await repo.request_cancel(session, job_id):
             response.status_code = 202
-            return JobOut.model_validate(repo.get_job(session, job_id))
-        job = repo.get_job(session, job_id)
+            return JobOut.model_validate(await repo.get_job(session, job_id))
+        job = await repo.get_job(session, job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
         if job.status is JobStatus.cancelled:
@@ -236,8 +244,8 @@ def cancel_job_route(
 
 
 @router.get("/jobs", response_model=JobList)
-def list_jobs(
-    session: Session = Depends(get_db),
+async def list_jobs(
+    session: AsyncSession = Depends(get_db),
     status: JobStatus | None = Query(default=None),
     type: JobType | None = Query(default=None),
     priority: JobPriority | None = Query(default=None),
@@ -246,7 +254,7 @@ def list_jobs(
     user: AuthedUser = Depends(get_current_user),
 ) -> JobList:
     try:
-        jobs, next_cursor = repo.list_jobs(
+        jobs, next_cursor = await repo.list_jobs(
             session,
             status=status,
             job_type=type,

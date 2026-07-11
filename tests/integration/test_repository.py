@@ -4,66 +4,66 @@ from app import repository as repo
 from app.schemas.enums import JobStatus, JobType
 
 
-def test_create_and_get(db_session):
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+async def test_create_and_get(db_session):
+    job = await repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
     assert job.status is JobStatus.pending
-    fetched = repo.get_job(db_session, job.id)
+    fetched = await repo.get_job(db_session, job.id)
     assert fetched.id == job.id
 
 
-def test_get_missing_returns_none(db_session):
-    assert repo.get_job(db_session, uuid.uuid4()) is None
+async def test_get_missing_returns_none(db_session):
+    assert await repo.get_job(db_session, uuid.uuid4()) is None
 
 
-def test_claim_guard_only_succeeds_once(db_session):
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
-    assert repo.claim_job(db_session, job.id) is True
-    assert repo.claim_job(db_session, job.id) is False  # already processing
-    db_session.refresh(job)
+async def test_claim_guard_only_succeeds_once(db_session):
+    job = await repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    assert await repo.claim_job(db_session, job.id) is True
+    assert await repo.claim_job(db_session, job.id) is False  # already processing
+    await db_session.refresh(job)
     assert job.status is JobStatus.processing
     assert job.started_at is not None
 
 
-def test_complete_and_fail(db_session):
-    j1 = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
-    repo.claim_job(db_session, j1.id)
-    repo.complete_job(db_session, j1.id, {"message_id": "m-1"})
-    db_session.refresh(j1)
+async def test_complete_and_fail(db_session):
+    j1 = await repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    await repo.claim_job(db_session, j1.id)
+    await repo.complete_job(db_session, j1.id, {"message_id": "m-1"})
+    await db_session.refresh(j1)
     assert j1.status is JobStatus.completed
     assert j1.result == {"message_id": "m-1"}
     assert j1.completed_at is not None
 
-    j2 = repo.create_job(db_session, JobType.webhook, {"url": "https://x.test"})
-    repo.claim_job(db_session, j2.id)
-    repo.fail_job(db_session, j2.id, {"type": "WebhookFailedError", "message": "boom"})
-    db_session.refresh(j2)
+    j2 = await repo.create_job(db_session, JobType.webhook, {"url": "https://x.test"})
+    await repo.claim_job(db_session, j2.id)
+    await repo.fail_job(db_session, j2.id, {"type": "WebhookFailedError", "message": "boom"})
+    await db_session.refresh(j2)
     assert j2.status is JobStatus.failed
     assert j2.error["type"] == "WebhookFailedError"
 
 
-def test_list_filters_and_cursor(db_session):
+async def test_list_filters_and_cursor(db_session):
     for _ in range(3):
-        repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
-    repo.create_job(db_session, JobType.report, {"report_type": "sales"})
+        await repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    await repo.create_job(db_session, JobType.report, {"report_type": "sales"})
 
-    emails, _ = repo.list_jobs(db_session, job_type=JobType.email)
+    emails, _ = await repo.list_jobs(db_session, job_type=JobType.email)
     assert len(emails) == 3
 
-    page1, cursor = repo.list_jobs(db_session, limit=2)
+    page1, cursor = await repo.list_jobs(db_session, limit=2)
     assert len(page1) == 2
     assert cursor is not None
-    page2, cursor2 = repo.list_jobs(db_session, limit=2, cursor=cursor)
+    page2, cursor2 = await repo.list_jobs(db_session, limit=2, cursor=cursor)
     assert len(page2) == 2
     assert cursor2 is None
     ids = {j.id for j in page1} | {j.id for j in page2}
     assert len(ids) == 4
 
 
-def test_create_scheduled_job_sets_fields(db_session):
+async def test_create_scheduled_job_sets_fields(db_session):
     from datetime import datetime, timezone
 
     when = datetime(2030, 1, 1, tzinfo=timezone.utc)
-    job = repo.create_job(
+    job = await repo.create_job(
         db_session,
         JobType.email,
         {"to": "a@b.com", "subject": "Hi"},
@@ -75,30 +75,30 @@ def test_create_scheduled_job_sets_fields(db_session):
     assert job.is_synced_to_redis is False
 
 
-def test_mark_synced_sets_flag(db_session):
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
-    repo.mark_synced(db_session, job.id)
-    db_session.refresh(job)
+async def test_mark_synced_sets_flag(db_session):
+    job = await repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    await repo.mark_synced(db_session, job.id)
+    await db_session.refresh(job)
     assert job.is_synced_to_redis is True
 
 
-def test_claim_accepts_scheduled_state(db_session):
+async def test_claim_accepts_scheduled_state(db_session):
     from datetime import datetime, timezone
 
-    job = repo.create_job(
+    job = await repo.create_job(
         db_session,
         JobType.email,
         {"to": "a@b.com", "subject": "Hi"},
         status=JobStatus.scheduled,
         scheduled_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
     )
-    assert repo.claim_job(db_session, job.id) is True
-    db_session.refresh(job)
+    assert await repo.claim_job(db_session, job.id) is True
+    await db_session.refresh(job)
     assert job.status is JobStatus.processing
     assert job.started_at is not None
 
 
-def test_job_has_scheduling_columns(db_session):
+async def test_job_has_scheduling_columns(db_session):
     from datetime import datetime, timezone
 
     from app.models.job import Job
@@ -111,47 +111,47 @@ def test_job_has_scheduling_columns(db_session):
         scheduled_at=when,
     )
     db_session.add(job)
-    db_session.commit()
-    db_session.refresh(job)
+    await db_session.commit()
+    await db_session.refresh(job)
     assert job.scheduled_at == when
     assert job.is_synced_to_redis is False
 
 
-def test_promote_scheduled_to_pending_only_scheduled(db_session):
+async def test_promote_scheduled_to_pending_only_scheduled(db_session):
     from datetime import datetime, timezone
 
     when = datetime(2020, 1, 1, tzinfo=timezone.utc)
-    scheduled = repo.create_job(
+    scheduled = await repo.create_job(
         db_session,
         JobType.email,
         {"to": "a@b.com", "subject": "Hi"},
         status=JobStatus.scheduled,
         scheduled_at=when,
     )
-    already_pending = repo.create_job(
+    already_pending = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}
     )
-    changed = repo.promote_scheduled_to_pending(
+    changed = await repo.promote_scheduled_to_pending(
         db_session, [scheduled.id, already_pending.id]
     )
     assert changed == 1
-    db_session.refresh(scheduled)
+    await db_session.refresh(scheduled)
     assert scheduled.status is JobStatus.pending
 
 
-def test_list_unsynced_filters_synced_and_grace(db_session):
+async def test_list_unsynced_filters_synced_and_grace(db_session):
     from datetime import datetime, timedelta, timezone
 
-    synced = repo.create_job(
+    synced = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}
     )
-    repo.mark_synced(db_session, synced.id)
-    orphan = repo.create_job(
+    await repo.mark_synced(db_session, synced.id)
+    orphan = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}
     )
     now = datetime.now(timezone.utc)
 
-    rows = repo.list_unsynced(
+    rows = await repo.list_unsynced(
         db_session, older_than=now + timedelta(seconds=1), limit=100
     )
     ids = {r.id for r in rows}
@@ -159,218 +159,218 @@ def test_list_unsynced_filters_synced_and_grace(db_session):
     assert synced.id not in ids
 
     # Grace window: nothing is old enough when the cutoff is in the past.
-    none_rows = repo.list_unsynced(
+    none_rows = await repo.list_unsynced(
         db_session, older_than=now - timedelta(seconds=1000), limit=100
     )
     assert none_rows == []
 
 
-def test_create_job_defaults_priority_normal(db_session):
+async def test_create_job_defaults_priority_normal(db_session):
     from app.schemas.enums import JobPriority
 
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    job = await repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
     assert job.priority is JobPriority.normal
 
 
-def test_create_job_sets_priority(db_session):
+async def test_create_job_sets_priority(db_session):
     from app.schemas.enums import JobPriority
 
-    job = repo.create_job(
+    job = await repo.create_job(
         db_session,
         JobType.email,
         {"to": "a@b.com", "subject": "Hi"},
         priority=JobPriority.high,
     )
-    db_session.refresh(job)
+    await db_session.refresh(job)
     assert job.priority is JobPriority.high
 
 
-def test_list_filters_by_priority(db_session):
+async def test_list_filters_by_priority(db_session):
     from app.schemas.enums import JobPriority
 
-    repo.create_job(
+    await repo.create_job(
         db_session,
         JobType.email,
         {"to": "a@b.com", "subject": "Hi"},
         priority=JobPriority.high,
     )
-    repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    await repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
 
-    highs, _ = repo.list_jobs(db_session, priority=JobPriority.high)
+    highs, _ = await repo.list_jobs(db_session, priority=JobPriority.high)
     assert len(highs) == 1
     assert highs[0].priority is JobPriority.high
 
 
-def test_get_promotion_info_batched(db_session):
+async def test_get_promotion_info_batched(db_session):
     from app.schemas.enums import JobPriority
 
-    a = repo.create_job(
+    a = await repo.create_job(
         db_session,
         JobType.email,
         {"to": "a@b.com", "subject": "Hi"},
         priority=JobPriority.high,
     )
-    b = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    b = await repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
 
-    result = repo.get_promotion_info(db_session, [a.id, b.id])
+    result = await repo.get_promotion_info(db_session, [a.id, b.id])
     assert result == {
         a.id: (JobPriority.high, None),
         b.id: (JobPriority.normal, None),
     }
 
 
-def test_get_promotion_info_empty_returns_empty(db_session):
-    assert repo.get_promotion_info(db_session, []) == {}
+async def test_get_promotion_info_empty_returns_empty(db_session):
+    assert await repo.get_promotion_info(db_session, []) == {}
 
 
-def test_create_job_defaults_attempts(db_session):
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
-    db_session.refresh(job)
+async def test_create_job_defaults_attempts(db_session):
+    job = await repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    await db_session.refresh(job)
     assert job.attempts == 0
     assert job.max_attempts == 4
 
 
-def test_create_job_sets_max_attempts(db_session):
-    job = repo.create_job(
+async def test_create_job_sets_max_attempts(db_session):
+    job = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}, max_attempts=2
     )
-    db_session.refresh(job)
+    await db_session.refresh(job)
     assert job.max_attempts == 2
 
 
-def test_complete_job_guarded_increments_attempts(db_session):
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
-    repo.claim_job(db_session, job.id)
-    assert repo.complete_job(db_session, job.id, {"message_id": "m1"}) is True
-    db_session.refresh(job)
+async def test_complete_job_guarded_increments_attempts(db_session):
+    job = await repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    await repo.claim_job(db_session, job.id)
+    assert await repo.complete_job(db_session, job.id, {"message_id": "m1"}) is True
+    await db_session.refresh(job)
     assert job.status is JobStatus.completed
     assert job.attempts == 1
 
 
-def test_complete_job_loses_when_not_processing(db_session):
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
-    repo.claim_job(db_session, job.id)
-    repo.retry_to_pending(db_session, job.id)  # someone re-queued it → now pending
-    assert repo.complete_job(db_session, job.id, {"message_id": "m1"}) is False
-    db_session.refresh(job)
+async def test_complete_job_loses_when_not_processing(db_session):
+    job = await repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    await repo.claim_job(db_session, job.id)
+    await repo.retry_to_pending(db_session, job.id)  # someone re-queued it → now pending
+    assert await repo.complete_job(db_session, job.id, {"message_id": "m1"}) is False
+    await db_session.refresh(job)
     assert job.status is JobStatus.pending
 
 
-def test_fail_job_guarded_increments_attempts(db_session):
-    job = repo.create_job(db_session, JobType.webhook, {"url": "https://x.test"})
-    repo.claim_job(db_session, job.id)
-    assert repo.fail_job(db_session, job.id, {"type": "E", "message": "boom"}) is True
-    db_session.refresh(job)
+async def test_fail_job_guarded_increments_attempts(db_session):
+    job = await repo.create_job(db_session, JobType.webhook, {"url": "https://x.test"})
+    await repo.claim_job(db_session, job.id)
+    assert await repo.fail_job(db_session, job.id, {"type": "E", "message": "boom"}) is True
+    await db_session.refresh(job)
     assert job.status is JobStatus.failed
     assert job.attempts == 1
 
 
-def test_retry_to_pending_resets_sync_and_counts(db_session):
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
-    repo.mark_synced(db_session, job.id)
-    repo.claim_job(db_session, job.id)
-    assert repo.retry_to_pending(db_session, job.id) is True
-    db_session.refresh(job)
+async def test_retry_to_pending_resets_sync_and_counts(db_session):
+    job = await repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    await repo.mark_synced(db_session, job.id)
+    await repo.claim_job(db_session, job.id)
+    assert await repo.retry_to_pending(db_session, job.id) is True
+    await db_session.refresh(job)
     assert job.status is JobStatus.pending
     assert job.attempts == 1
     assert job.is_synced_to_redis is False
     assert job.started_at is None
 
 
-def test_retry_to_scheduled_sets_when(db_session):
+async def test_retry_to_scheduled_sets_when(db_session):
     from datetime import datetime, timezone
 
     when = datetime(2030, 1, 1, tzinfo=timezone.utc)
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
-    repo.claim_job(db_session, job.id)
-    assert repo.retry_to_scheduled(db_session, job.id, when) is True
-    db_session.refresh(job)
+    job = await repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    await repo.claim_job(db_session, job.id)
+    assert await repo.retry_to_scheduled(db_session, job.id, when) is True
+    await db_session.refresh(job)
     assert job.status is JobStatus.scheduled
     assert job.scheduled_at == when
     assert job.attempts == 1
     assert job.is_synced_to_redis is False
 
 
-def test_reset_failed_to_pending_only_from_failed(db_session):
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
-    repo.claim_job(db_session, job.id)
-    repo.fail_job(db_session, job.id, {"type": "E", "message": "x"})
-    assert repo.reset_failed_to_pending(db_session, job.id) is True
-    db_session.refresh(job)
+async def test_reset_failed_to_pending_only_from_failed(db_session):
+    job = await repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+    await repo.claim_job(db_session, job.id)
+    await repo.fail_job(db_session, job.id, {"type": "E", "message": "x"})
+    assert await repo.reset_failed_to_pending(db_session, job.id) is True
+    await db_session.refresh(job)
     assert job.status is JobStatus.pending
     assert job.attempts == 0
     assert job.error is None
     assert job.completed_at is None
     assert job.is_synced_to_redis is False
     # A second reset finds it already pending → guard fails.
-    assert repo.reset_failed_to_pending(db_session, job.id) is False
+    assert await repo.reset_failed_to_pending(db_session, job.id) is False
 
 
-def test_init_progress_only_when_processing(db_session):
-    job = repo.create_job(db_session, JobType.batch, {"items": []})
-    assert repo.init_progress(db_session, job.id) is False  # pending, not processing
-    repo.claim_job(db_session, job.id)
-    assert repo.init_progress(db_session, job.id) is True
-    db_session.refresh(job)
+async def test_init_progress_only_when_processing(db_session):
+    job = await repo.create_job(db_session, JobType.batch, {"items": []})
+    assert await repo.init_progress(db_session, job.id) is False  # pending, not processing
+    await repo.claim_job(db_session, job.id)
+    assert await repo.init_progress(db_session, job.id) is True
+    await db_session.refresh(job)
     assert job.progress == 0
 
 
-def test_complete_job_sets_progress_for_batch(db_session):
-    job = repo.create_job(db_session, JobType.batch, {"items": []})
-    repo.claim_job(db_session, job.id)
-    assert repo.complete_job(db_session, job.id, {"total": 0}, progress=100) is True
-    db_session.refresh(job)
+async def test_complete_job_sets_progress_for_batch(db_session):
+    job = await repo.create_job(db_session, JobType.batch, {"items": []})
+    await repo.claim_job(db_session, job.id)
+    assert await repo.complete_job(db_session, job.id, {"total": 0}, progress=100) is True
+    await db_session.refresh(job)
     assert job.status is JobStatus.completed
     assert job.progress == 100
 
 
-def test_complete_job_leaves_progress_null_for_non_batch(db_session):
-    job = repo.create_job(db_session, JobType.email, {"to": "a", "subject": "b"})
-    repo.claim_job(db_session, job.id)
-    repo.complete_job(db_session, job.id, {"message_id": "m"})
-    db_session.refresh(job)
+async def test_complete_job_leaves_progress_null_for_non_batch(db_session):
+    job = await repo.create_job(db_session, JobType.email, {"to": "a", "subject": "b"})
+    await repo.claim_job(db_session, job.id)
+    await repo.complete_job(db_session, job.id, {"message_id": "m"})
+    await db_session.refresh(job)
     assert job.progress is None
 
 
-def test_cancel_pending_or_scheduled_guard(db_session):
-    job = repo.create_job(db_session, JobType.email, {"to": "a", "subject": "b"})
-    assert repo.cancel_pending_or_scheduled(db_session, job.id) is True
-    db_session.refresh(job)
+async def test_cancel_pending_or_scheduled_guard(db_session):
+    job = await repo.create_job(db_session, JobType.email, {"to": "a", "subject": "b"})
+    assert await repo.cancel_pending_or_scheduled(db_session, job.id) is True
+    await db_session.refresh(job)
     assert job.status is JobStatus.cancelled
     # second call is a no-op (already cancelled)
-    assert repo.cancel_pending_or_scheduled(db_session, job.id) is False
+    assert await repo.cancel_pending_or_scheduled(db_session, job.id) is False
 
 
-def test_cancel_pending_or_scheduled_rejects_processing(db_session):
-    job = repo.create_job(db_session, JobType.email, {"to": "a", "subject": "b"})
-    repo.claim_job(db_session, job.id)
-    assert repo.cancel_pending_or_scheduled(db_session, job.id) is False
+async def test_cancel_pending_or_scheduled_rejects_processing(db_session):
+    job = await repo.create_job(db_session, JobType.email, {"to": "a", "subject": "b"})
+    await repo.claim_job(db_session, job.id)
+    assert await repo.cancel_pending_or_scheduled(db_session, job.id) is False
 
 
-def test_request_cancel_only_when_processing(db_session):
-    job = repo.create_job(db_session, JobType.batch, {"items": []})
-    assert repo.request_cancel(db_session, job.id) is False  # pending
-    repo.claim_job(db_session, job.id)
-    assert repo.request_cancel(db_session, job.id) is True
-    db_session.refresh(job)
+async def test_request_cancel_only_when_processing(db_session):
+    job = await repo.create_job(db_session, JobType.batch, {"items": []})
+    assert await repo.request_cancel(db_session, job.id) is False  # pending
+    await repo.claim_job(db_session, job.id)
+    assert await repo.request_cancel(db_session, job.id) is True
+    await db_session.refresh(job)
     assert job.cancel_requested_at is not None
 
 
-def test_cancel_job_guarded_terminal(db_session):
-    job = repo.create_job(db_session, JobType.batch, {"items": []})
-    repo.claim_job(db_session, job.id)
-    assert repo.cancel_job(db_session, job.id, {"total": 3, "succeeded": 1}) is True
-    db_session.refresh(job)
+async def test_cancel_job_guarded_terminal(db_session):
+    job = await repo.create_job(db_session, JobType.batch, {"items": []})
+    await repo.claim_job(db_session, job.id)
+    assert await repo.cancel_job(db_session, job.id, {"total": 3, "succeeded": 1}) is True
+    await db_session.refresh(job)
     assert job.status is JobStatus.cancelled
     assert job.result == {"total": 3, "succeeded": 1}
 
 
-def test_get_by_idempotency_key(db_session):
-    owner = repo.upsert_user(db_session, "owner", "h-owner")
-    db_session.commit()
+async def test_get_by_idempotency_key(db_session):
+    owner = await repo.upsert_user(db_session, "owner", "h-owner")
+    await db_session.commit()
     key = "abc"
-    assert repo.get_by_idempotency_key(db_session, key, owner) is None
-    job = repo.create_job(
+    assert await repo.get_by_idempotency_key(db_session, key, owner) is None
+    job = await repo.create_job(
         db_session,
         JobType.email,
         {"to": "a", "subject": "b"},
@@ -378,90 +378,90 @@ def test_get_by_idempotency_key(db_session):
         idempotency_key=key,
         idempotency_hash="h1",
     )
-    found = repo.get_by_idempotency_key(db_session, key, owner)
+    found = await repo.get_by_idempotency_key(db_session, key, owner)
     assert found is not None and found.id == job.id
     assert found.idempotency_hash == "h1"
 
 
-def test_create_job_persists_trace_context(db_session):
+async def test_create_job_persists_trace_context(db_session):
     carrier = {"traceparent": f"00-{'ab' * 16}-{'cd' * 8}-01"}
-    job = repo.create_job(
+    job = await repo.create_job(
         db_session,
         JobType.email,
         {"to": "a@b.com", "subject": "Hi"},
         trace_context=carrier,
     )
-    db_session.refresh(job)
+    await db_session.refresh(job)
     assert job.trace_context == carrier
 
 
-def test_create_job_trace_context_defaults_to_none(db_session):
-    job = repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
+async def test_create_job_trace_context_defaults_to_none(db_session):
+    job = await repo.create_job(db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"})
     assert job.trace_context is None
 
 
-def test_upsert_user_inserts_then_rotates(db_session):
+async def test_upsert_user_inserts_then_rotates(db_session):
     from sqlalchemy import select
 
     from app.models.user import User
 
-    uid1 = repo.upsert_user(db_session, "alice", "hash-one")
-    db_session.commit()
-    uid2 = repo.upsert_user(db_session, "alice", "hash-two")
-    db_session.commit()
+    uid1 = await repo.upsert_user(db_session, "alice", "hash-one")
+    await db_session.commit()
+    uid2 = await repo.upsert_user(db_session, "alice", "hash-two")
+    await db_session.commit()
 
     assert uid1 == uid2  # same row, key rotated
-    row = db_session.execute(select(User).where(User.name == "alice")).scalar_one()
+    row = (await db_session.execute(select(User).where(User.name == "alice"))).scalar_one()
     assert row.key_hash == "hash-two"
 
 
-def test_get_user_by_key_hash(db_session):
-    uid = repo.upsert_user(db_session, "alice", "hash-one")
-    db_session.commit()
-    found = repo.get_user_by_key_hash(db_session, "hash-one")
+async def test_get_user_by_key_hash(db_session):
+    uid = await repo.upsert_user(db_session, "alice", "hash-one")
+    await db_session.commit()
+    found = await repo.get_user_by_key_hash(db_session, "hash-one")
     assert found is not None and found.id == uid
-    assert repo.get_user_by_key_hash(db_session, "wrong") is None
+    assert await repo.get_user_by_key_hash(db_session, "wrong") is None
 
 
-def test_get_job_scoped_to_owner(db_session):
+async def test_get_job_scoped_to_owner(db_session):
     from app.schemas.enums import JobType
 
-    owner = repo.upsert_user(db_session, "owner", "h-owner")
-    other = repo.upsert_user(db_session, "other", "h-other")
-    db_session.commit()
-    job = repo.create_job(
+    owner = await repo.upsert_user(db_session, "owner", "h-owner")
+    other = await repo.upsert_user(db_session, "other", "h-other")
+    await db_session.commit()
+    job = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "s"}, user_id=owner
     )
 
-    assert repo.get_job(db_session, job.id, user_id=owner) is not None
-    assert repo.get_job(db_session, job.id, user_id=other) is None
-    assert repo.get_job(db_session, job.id) is not None  # unscoped (internal)
+    assert await repo.get_job(db_session, job.id, user_id=owner) is not None
+    assert await repo.get_job(db_session, job.id, user_id=other) is None
+    assert await repo.get_job(db_session, job.id) is not None  # unscoped (internal)
 
 
-def test_list_jobs_scoped_to_owner(db_session):
+async def test_list_jobs_scoped_to_owner(db_session):
     from app.schemas.enums import JobType
 
-    owner = repo.upsert_user(db_session, "owner", "h-owner")
-    other = repo.upsert_user(db_session, "other", "h-other")
-    db_session.commit()
-    mine = repo.create_job(
+    owner = await repo.upsert_user(db_session, "owner", "h-owner")
+    other = await repo.upsert_user(db_session, "other", "h-other")
+    await db_session.commit()
+    mine = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "s"}, user_id=owner
     )
-    repo.create_job(
+    await repo.create_job(
         db_session, JobType.email, {"to": "c@d.com", "subject": "s"}, user_id=other
     )
 
-    rows, _ = repo.list_jobs(db_session, user_id=owner)
+    rows, _ = await repo.list_jobs(db_session, user_id=owner)
     assert [j.id for j in rows] == [mine.id]
 
 
-def test_idempotency_lookup_scoped_per_user(db_session):
+async def test_idempotency_lookup_scoped_per_user(db_session):
     from app.schemas.enums import JobType
 
-    owner = repo.upsert_user(db_session, "owner", "h-owner")
-    other = repo.upsert_user(db_session, "other", "h-other")
-    db_session.commit()
-    job = repo.create_job(
+    owner = await repo.upsert_user(db_session, "owner", "h-owner")
+    other = await repo.upsert_user(db_session, "other", "h-other")
+    await db_session.commit()
+    job = await repo.create_job(
         db_session,
         JobType.email,
         {"to": "a@b.com", "subject": "s"},
@@ -470,5 +470,5 @@ def test_idempotency_lookup_scoped_per_user(db_session):
         idempotency_hash="x",
     )
 
-    assert repo.get_by_idempotency_key(db_session, "k1", owner).id == job.id
-    assert repo.get_by_idempotency_key(db_session, "k1", other) is None
+    assert (await repo.get_by_idempotency_key(db_session, "k1", owner)).id == job.id
+    assert await repo.get_by_idempotency_key(db_session, "k1", other) is None

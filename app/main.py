@@ -26,10 +26,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         for stream in settings.ordered_streams:
-            ensure_group(redis_client, stream, settings.consumer_group)
+            await ensure_group(redis_client, stream, settings.consumer_group)
         yield
-        redis_client.close()
-        engine.dispose()
+        await redis_client.aclose()
+        await engine.dispose()
         shutdown_telemetry()
 
     app = FastAPI(title="Job Processor", lifespan=lifespan)

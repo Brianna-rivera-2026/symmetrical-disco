@@ -1,4 +1,8 @@
+import asyncio
+import sys
+
 import pytest
+import pytest_asyncio
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
@@ -13,6 +17,10 @@ from app.core.db import make_session_factory as _make_session_factory
 from app.core.redis import create_redis_client
 from app.main import create_app
 from app.users.keys import hash_key
+
+# Fix for Windows asyncio event loop policy with psycopg
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 DEFAULT_TEST_KEY = "default-user-key"
 SECOND_TEST_KEY = "second-user-key"
@@ -30,26 +38,26 @@ def database_url(postgres_container) -> str:
 
 
 @pytest.fixture(scope="session")
-def pg_engine(database_url):
+async def pg_engine(database_url):
     cfg = Config("alembic.ini")
     cfg.set_main_option("script_location", "alembic")
     cfg.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(cfg, "head")
     engine = make_engine(database_url)
     yield engine
-    engine.dispose()
+    await engine.dispose()
 
 
 @pytest.fixture
-def db_session(pg_engine):
+async def db_session(pg_engine):
     factory = make_session_factory(pg_engine)
     session = factory()
     try:
         yield session
     finally:
-        session.close()
-        with pg_engine.begin() as conn:
-            conn.execute(text("TRUNCATE TABLE jobs, users"))
+        await session.close()
+        async with pg_engine.begin() as conn:
+            await conn.execute(text("TRUNCATE TABLE jobs, users"))
 
 
 @pytest.fixture(scope="session")
@@ -58,78 +66,100 @@ def redis_container():
         yield rc
 
 
-@pytest.fixture
-def redis_client(redis_container):
+@pytest_asyncio.fixture(loop_scope="function")
+async def redis_client(redis_container):
     url = f"redis://{redis_container.get_container_host_ip()}:{redis_container.get_exposed_port(6379)}/0"
     client = create_redis_client(url)
     yield client
-    client.flushdb()
+    await client.flushdb()
+    await client.aclose()
+
+
+@pytest.fixture
+def sync_redis_client(redis_container):
+    """Plain sync `redis.Redis`, for exercising the ticker's OTel gauge
+    callbacks which run on the exporter thread and cannot await."""
+    import redis as sync_redis
+
+    url = f"redis://{redis_container.get_container_host_ip()}:{redis_container.get_exposed_port(6379)}/0"
+    client = sync_redis.Redis.from_url(url, decode_responses=True)
+    yield client
     client.close()
 
 
 @pytest.fixture
+def sync_session_factory(database_url):
+    """Plain sync sessionmaker, for exercising the ticker's OTel gauge
+    callbacks which run on the exporter thread and cannot await."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    engine = create_engine(database_url, pool_pre_ping=True)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    yield factory
+    engine.dispose()
+
+
+@pytest.fixture(scope="session")
 def test_settings(database_url, redis_container) -> Settings:
     redis_url = f"redis://{redis_container.get_container_host_ip()}:{redis_container.get_exposed_port(6379)}/0"
     return Settings(database_url=database_url, redis_url=redis_url)
 
 
 @pytest.fixture
-def client(pg_engine, test_settings):
+async def client(pg_engine, test_settings):
     factory = _make_session_factory(pg_engine)
-    with factory() as session:
-        repo.upsert_user(session, "default-user", hash_key(DEFAULT_TEST_KEY))
-        session.commit()
+    async with factory() as session:
+        await repo.upsert_user(session, "default-user", hash_key(DEFAULT_TEST_KEY))
+        await session.commit()
     app = create_app(test_settings)
     with TestClient(app) as c:
         c.headers.update({"X-API-Key": DEFAULT_TEST_KEY})
         yield c
-    with pg_engine.begin() as conn:
-        conn.execute(text("TRUNCATE TABLE jobs, users"))
-    # Some tests swap app.state.redis for a broken client to simulate an outage;
-    # flush the real backing instance directly so teardown never depends on
-    # whatever connection a test left in place.
+    async with pg_engine.begin() as conn:
+        await conn.execute(text("TRUNCATE TABLE jobs, users"))
     real_redis = create_redis_client(test_settings.redis_url)
     try:
-        real_redis.flushdb()
+        await real_redis.flushdb()
     finally:
-        real_redis.close()
+        await real_redis.aclose()
 
 
 @pytest.fixture
-def default_user_id(client, pg_engine):
+async def default_user_id(client, pg_engine):
     """UUID of the default test user seeded by the `client` fixture, for tests
     that create jobs directly via `repo.create_job(db_session, ...)` and need
     them owned by the same user the `client` fixture authenticates as."""
     factory = _make_session_factory(pg_engine)
-    with factory() as session:
-        return repo.get_user_by_key_hash(session, hash_key(DEFAULT_TEST_KEY)).id
+    async with factory() as session:
+        return (await repo.get_user_by_key_hash(session, hash_key(DEFAULT_TEST_KEY))).id
 
 
 @pytest.fixture
-def unauth_client(pg_engine, test_settings):
+async def unauth_client(pg_engine, test_settings):
     """TestClient with no default X-API-Key header."""
     app = create_app(test_settings)
     with TestClient(app) as c:
         yield c
-    with pg_engine.begin() as conn:
-        conn.execute(text("TRUNCATE TABLE jobs, users"))
+    async with pg_engine.begin() as conn:
+        await conn.execute(text("TRUNCATE TABLE jobs, users"))
 
 
 @pytest.fixture
-def second_user(pg_engine):
+async def second_user(pg_engine):
     """Headers for a second, independent user."""
     factory = _make_session_factory(pg_engine)
-    with factory() as session:
-        repo.upsert_user(session, "second-user", hash_key(SECOND_TEST_KEY))
-        session.commit()
+    async with factory() as session:
+        await repo.upsert_user(session, "second-user", hash_key(SECOND_TEST_KEY))
+        await session.commit()
     return {"X-API-Key": SECOND_TEST_KEY}
 
 
 @pytest.fixture
-def owner_id(pg_engine):
+async def owner_id(pg_engine):
     """A persisted user id for tests that create jobs directly via the repo."""
     factory = _make_session_factory(pg_engine)
-    with factory() as session:
-        uid = repo.upsert_user(session, "job-owner", hash_key("job-owner-key"))
-        session.commit()
+    async with factory() as session:
+        uid = await repo.upsert_user(session, "job-owner", hash_key("job-owner-key"))
+        await session.commit()
     return uid

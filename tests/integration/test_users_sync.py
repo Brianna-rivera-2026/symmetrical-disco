@@ -10,40 +10,40 @@ from app.users import sync
 from app.users.keys import hash_key
 
 
-def _names_and_hashes(session) -> dict[str, str]:
-    rows = session.execute(select(User.name, User.key_hash)).all()
+async def _names_and_hashes(session) -> dict[str, str]:
+    rows = (await session.execute(select(User.name, User.key_hash))).all()
     return {name: key_hash for name, key_hash in rows}
 
 
-def test_sync_inserts_new_users(db_session):
-    count = sync.sync_users(db_session, {"alice": "key-a", "bob": "key-b"})
+async def test_sync_inserts_new_users(db_session):
+    count = await sync.sync_users(db_session, {"alice": "key-a", "bob": "key-b"})
     assert count == 2
-    assert _names_and_hashes(db_session) == {
+    assert await _names_and_hashes(db_session) == {
         "alice": hash_key("key-a"),
         "bob": hash_key("key-b"),
     }
 
 
-def test_sync_rotates_changed_key(db_session):
-    sync.sync_users(db_session, {"alice": "old-key"})
-    sync.sync_users(db_session, {"alice": "new-key"})
-    assert _names_and_hashes(db_session)["alice"] == hash_key("new-key")
+async def test_sync_rotates_changed_key(db_session):
+    await sync.sync_users(db_session, {"alice": "old-key"})
+    await sync.sync_users(db_session, {"alice": "new-key"})
+    assert (await _names_and_hashes(db_session))["alice"] == hash_key("new-key")
 
 
-def test_sync_same_input_is_noop(db_session):
-    sync.sync_users(db_session, {"alice": "key-a"})
-    before = _names_and_hashes(db_session)
-    sync.sync_users(db_session, {"alice": "key-a"})
-    assert _names_and_hashes(db_session) == before
+async def test_sync_same_input_is_noop(db_session):
+    await sync.sync_users(db_session, {"alice": "key-a"})
+    before = await _names_and_hashes(db_session)
+    await sync.sync_users(db_session, {"alice": "key-a"})
+    assert await _names_and_hashes(db_session) == before
 
 
-def test_sync_leaves_absent_users_untouched(db_session):
-    sync.sync_users(db_session, {"alice": "key-a"})
-    sync.sync_users(db_session, {"bob": "key-b"})  # alice not in this file
-    assert set(_names_and_hashes(db_session)) == {"alice", "bob"}
+async def test_sync_leaves_absent_users_untouched(db_session):
+    await sync.sync_users(db_session, {"alice": "key-a"})
+    await sync.sync_users(db_session, {"bob": "key-b"})  # alice not in this file
+    assert set(await _names_and_hashes(db_session)) == {"alice", "bob"}
 
 
-def test_sync_partial_failure_rolls_back(db_session, monkeypatch):
+async def test_sync_partial_failure_rolls_back(db_session, monkeypatch):
     calls = {"n": 0}
     real = sync.hash_key
 
@@ -55,9 +55,9 @@ def test_sync_partial_failure_rolls_back(db_session, monkeypatch):
 
     monkeypatch.setattr(sync, "hash_key", flaky)
     with pytest.raises(RuntimeError):
-        sync.sync_users(db_session, {"alice": "key-a", "bob": "key-b"})
-    db_session.rollback()
-    assert _names_and_hashes(db_session) == {}  # nothing committed
+        await sync.sync_users(db_session, {"alice": "key-a", "bob": "key-b"})
+    await db_session.rollback()
+    assert await _names_and_hashes(db_session) == {}  # nothing committed
 
 
 def test_run_db_failure_does_not_leak_key_hash_into_logs(
@@ -135,14 +135,21 @@ def test_run_missing_file_exits_nonzero(test_settings, tmp_path):
 
 
 def test_run_happy_path_exits_zero(test_settings, pg_engine, tmp_path):
+    import asyncio
+
     from sqlalchemy import text
 
     keyfile = tmp_path / "keys.json"
     keyfile.write_text(json.dumps({"alice": "key-a"}))
     settings = test_settings.model_copy(update={"api_user_keys_file": str(keyfile)})
     assert sync.run(settings) == 0
-    with pg_engine.begin() as conn:
-        n = conn.execute(text("SELECT count(*) FROM users")).scalar_one()
+
+    async def _check_and_truncate():
+        async with pg_engine.begin() as conn:
+            n = (await conn.execute(text("SELECT count(*) FROM users"))).scalar_one()
+        async with pg_engine.begin() as conn:
+            await conn.execute(text("TRUNCATE TABLE jobs, users"))
+        return n
+
+    n = asyncio.run(_check_and_truncate())
     assert n == 1
-    with pg_engine.begin() as conn:
-        conn.execute(text("TRUNCATE TABLE jobs, users"))

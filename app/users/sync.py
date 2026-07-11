@@ -7,13 +7,14 @@ from the file are untouched. Raw keys never leave this process; only names
 are logged.
 """
 
+import asyncio
 import json
 import logging
 import sys
 
 from opentelemetry import trace
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import repository as repo
 from app.core.config import Settings, get_settings
@@ -36,15 +37,15 @@ def load_keys(path: str) -> dict[str, str]:
     return data
 
 
-def sync_users(session: Session, keys: dict[str, str]) -> int:
+async def sync_users(session: AsyncSession, keys: dict[str, str]) -> int:
     """Upsert every entry, then commit once — the whole batch is atomic."""
     for name, raw_key in keys.items():
-        repo.upsert_user(session, name, hash_key(raw_key))
-    session.commit()
+        await repo.upsert_user(session, name, hash_key(raw_key))
+    await session.commit()
     return len(keys)
 
 
-def run(settings: Settings) -> int:
+async def _run_async(settings: Settings) -> int:
     configure_telemetry(settings, "users-sync")
     tracer = trace.get_tracer("app.users.sync")
     engine = make_engine(settings.database_url)
@@ -53,8 +54,8 @@ def run(settings: Settings) -> int:
         with tracer.start_as_current_span("users.sync") as span:
             keys = load_keys(settings.api_user_keys_file)
             session_factory = make_session_factory(engine)
-            with session_factory() as session:
-                count = sync_users(session, keys)
+            async with session_factory() as session:
+                count = await sync_users(session, keys)
             span.set_attribute("users.synced_count", count)
             log.info("users.synced", extra={"count": count, "names": sorted(keys)})
     except (OSError, ValueError, SQLAlchemyError) as exc:
@@ -66,11 +67,15 @@ def run(settings: Settings) -> int:
         log.error("users.sync_failed", extra={"error_type": type(exc).__name__})
         exit_code = 1
     finally:
-        engine.dispose()
+        await engine.dispose()
         # One-shot process: shutdown flushes the batch processors so the
         # span/logs actually reach the collector before we exit.
         shutdown_telemetry()
     return exit_code
+
+
+def run(settings: Settings) -> int:
+    return asyncio.run(_run_async(settings))
 
 
 def main() -> int:

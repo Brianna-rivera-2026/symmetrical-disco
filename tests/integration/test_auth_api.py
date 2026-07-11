@@ -63,29 +63,33 @@ def test_idempotency_key_scoped_per_user(client, second_user):
     assert other.json()["id"] != first.json()["id"]
 
 
-def test_submitted_job_is_owned(client, pg_engine):
+async def test_submitted_job_is_owned(client, pg_engine):
     from sqlalchemy import text
 
     job_id = client.post("/jobs", json=EMAIL_JOB).json()["id"]
-    with pg_engine.begin() as conn:
-        owner = conn.execute(
-            text("SELECT user_id FROM jobs WHERE id = :id"), {"id": job_id}
+    async with pg_engine.begin() as conn:
+        owner = (
+            await conn.execute(
+                text("SELECT user_id FROM jobs WHERE id = :id"), {"id": job_id}
+            )
         ).scalar_one()
     assert owner is not None
 
 
-def test_deleted_user_still_authenticates_within_ttl(client, second_user, pg_engine):
+async def test_deleted_user_still_authenticates_within_ttl(
+    client, second_user, pg_engine
+):
     from sqlalchemy import text
 
     # Prime the cache.
     assert client.get("/jobs", headers=second_user).status_code == 200
-    with pg_engine.begin() as conn:
-        conn.execute(text("DELETE FROM users WHERE name = 'second-user'"))
+    async with pg_engine.begin() as conn:
+        await conn.execute(text("DELETE FROM users WHERE name = 'second-user'"))
     # Row is gone but the cache entry (default TTL 60s) still validates.
     assert client.get("/jobs", headers=second_user).status_code == 200
 
 
-def test_ttl_zero_makes_revocation_immediate(pg_engine, test_settings):
+async def test_ttl_zero_makes_revocation_immediate(pg_engine, test_settings):
     from fastapi.testclient import TestClient
     from sqlalchemy import text
 
@@ -96,20 +100,20 @@ def test_ttl_zero_makes_revocation_immediate(pg_engine, test_settings):
 
     settings = test_settings.model_copy(update={"auth_cache_ttl_s": 0.0})
     factory = make_session_factory(pg_engine)
-    with factory() as session:
-        repo.upsert_user(session, "ephemeral", hash_key("ephemeral-key"))
-        session.commit()
+    async with factory() as session:
+        await repo.upsert_user(session, "ephemeral", hash_key("ephemeral-key"))
+        await session.commit()
 
     app = create_app(settings)
     with TestClient(app) as c:
         headers = {"X-API-Key": "ephemeral-key"}
         assert c.get("/jobs", headers=headers).status_code == 200
-        with pg_engine.begin() as conn:
-            conn.execute(text("DELETE FROM users WHERE name = 'ephemeral'"))
+        async with pg_engine.begin() as conn:
+            await conn.execute(text("DELETE FROM users WHERE name = 'ephemeral'"))
         assert c.get("/jobs", headers=headers).status_code == 401
 
 
-def test_unknown_key_is_not_negatively_cached(client, pg_engine):
+async def test_unknown_key_is_not_negatively_cached(client, pg_engine):
     from app.core.db import make_session_factory
     from app.users.keys import hash_key
     from app import repository as repo
@@ -118,9 +122,9 @@ def test_unknown_key_is_not_negatively_cached(client, pg_engine):
     assert client.get("/jobs", headers=headers).status_code == 401
 
     factory = make_session_factory(pg_engine)
-    with factory() as session:
-        repo.upsert_user(session, "late-user", hash_key("late-key"))
-        session.commit()
+    async with factory() as session:
+        await repo.upsert_user(session, "late-user", hash_key("late-key"))
+        await session.commit()
 
     # The earlier 401 must not have poisoned anything.
     assert client.get("/jobs", headers=headers).status_code == 200

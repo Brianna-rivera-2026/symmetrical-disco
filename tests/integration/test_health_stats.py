@@ -5,37 +5,39 @@ from app.queue.consumer import ensure_group
 from app.schemas.enums import JobType
 
 
-def _reset_streams(r, s):
-    r.flushdb()
+async def _reset_streams(r, s):
+    await r.flushdb()
     for stream in s.ordered_streams:
-        ensure_group(r, stream, s.consumer_group)
+        await ensure_group(r, stream, s.consumer_group)
 
 
-def test_stats_reports_queue_and_job_metrics(client, db_session):
-    r = client.app.state.redis
+async def test_stats_reports_queue_and_job_metrics(client, db_session, redis_client):
+    r = redis_client
     s = client.app.state.settings
-    _reset_streams(r, s)
+    await _reset_streams(r, s)
 
     # high: 3 waiting, none delivered -> depth 3, in_flight 0
     for _ in range(3):
-        r.xadd(s.stream_high, {"job_id": str(uuid4())})
+        await r.xadd(s.stream_high, {"job_id": str(uuid4())})
     # normal: 2 added, 1 delivered to consumer "w1" -> depth 1, in_flight 1
     for _ in range(2):
-        r.xadd(s.stream_normal, {"job_id": str(uuid4())})
-    r.xreadgroup(
+        await r.xadd(s.stream_normal, {"job_id": str(uuid4())})
+    await r.xreadgroup(
         groupname=s.consumer_group,
         consumername="w1",
         streams={s.stream_normal: ">"},
         count=1,
     )
     # one delayed (scheduled) member
-    r.zadd(s.delayed_zset, {str(uuid4()): 9999999999})
+    await r.zadd(s.delayed_zset, {str(uuid4()): 9999999999})
 
     # DB rows across statuses
-    repo.create_job(db_session, JobType.email, {"to": "a", "subject": "b"})  # pending
-    done = repo.create_job(db_session, JobType.email, {"to": "a", "subject": "b"})
-    repo.claim_job(db_session, done.id)
-    repo.complete_job(db_session, done.id, {"ok": True})  # completed
+    await repo.create_job(
+        db_session, JobType.email, {"to": "a", "subject": "b"}
+    )  # pending
+    done = await repo.create_job(db_session, JobType.email, {"to": "a", "subject": "b"})
+    await repo.claim_job(db_session, done.id)
+    await repo.complete_job(db_session, done.id, {"ok": True})  # completed
 
     body = client.get("/stats").json()
 
@@ -51,16 +53,16 @@ def test_stats_reports_queue_and_job_metrics(client, db_session):
     assert body["jobs"]["oldest_pending_age_seconds"] >= 0
 
 
-def test_stats_workers_excludes_reaper_consumer(client, db_session):
+async def test_stats_workers_excludes_reaper_consumer(client, db_session, redis_client):
     from app.ticker.runner import reap_stale
 
-    r = client.app.state.redis
+    r = redis_client
     s = client.app.state.settings
-    _reset_streams(r, s)
+    await _reset_streams(r, s)
 
     # One real worker: deliver a message to consumer "w1".
-    r.xadd(s.stream_normal, {"job_id": str(uuid4())})
-    r.xreadgroup(
+    await r.xadd(s.stream_normal, {"job_id": str(uuid4())})
+    await r.xreadgroup(
         groupname=s.consumer_group,
         consumername="w1",
         streams={s.stream_normal: ">"},
@@ -71,7 +73,7 @@ def test_stats_workers_excludes_reaper_consumer(client, db_session):
     # registers its own consumer name in the group as a side effect even when
     # it claims zero messages, so this leaves a "reaper" consumer behind on
     # every stream.
-    reap_stale(db_session, r, s)
+    await reap_stale(db_session, r, s)
 
     body = client.get("/stats").json()
 
