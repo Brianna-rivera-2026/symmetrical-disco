@@ -1,4 +1,5 @@
 import httpx
+import pytest
 import pytest_asyncio
 import redis.asyncio as redis_lib
 
@@ -79,3 +80,34 @@ async def test_ready_503_when_redis_down(pg_engine):
 async def test_unknown_path_404(health_server):
     server, _ = health_server
     assert (await _get(server, "/nope")).status_code == 404
+
+
+async def test_start_raises_cleanly_on_port_conflict(pg_engine, redis_client):
+    """Regression: a bind conflict must surface as a normal exception from
+    start(), not crash the process. Previously uvicorn's Server.startup()
+    caught the OSError itself and called sys.exit(1) inside the task
+    coroutine; asyncio re-raises that SystemExit immediately instead of
+    storing it as a task result, tearing through the event loop instead of
+    giving the caller anything catchable."""
+    first = HealthServer(
+        port=0,
+        heartbeat=Heartbeat(),
+        max_heartbeat_age_s=30.0,
+        engine=pg_engine,
+        redis_client=redis_client,
+    )
+    await first.start()
+    used_port = first.port
+
+    second = HealthServer(
+        port=used_port,
+        heartbeat=Heartbeat(),
+        max_heartbeat_age_s=30.0,
+        engine=pg_engine,
+        redis_client=redis_client,
+    )
+    try:
+        with pytest.raises(OSError):
+            await second.start()
+    finally:
+        await first.stop()

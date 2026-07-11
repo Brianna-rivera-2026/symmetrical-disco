@@ -1,4 +1,5 @@
 import asyncio
+import socket
 import time
 
 import redis.asyncio as redis
@@ -37,6 +38,7 @@ class Heartbeat:
 _REDIS_PROBE_TIMEOUT_S = (
     2.0  # /ready must fail fast despite the client's generous 5s/10s socket timeouts
 )
+_LISTEN_BACKLOG = 100  # matches uvicorn's own default backlog
 
 
 class HealthServer:
@@ -102,10 +104,27 @@ class HealthServer:
         self.port = port
 
     async def start(self) -> None:
-        self._task = asyncio.create_task(self._server.serve())
+        # Bind the listening socket ourselves, synchronously, before handing it
+        # to uvicorn. If we let uvicorn's Server.startup() do the bind, it
+        # catches OSError internally and calls sys.exit(1) *inside* the task
+        # coroutine; asyncio re-raises SystemExit immediately from task-stepping
+        # instead of storing it as a normal task result, which tears through
+        # the event loop instead of giving the caller a catchable exception.
+        # Binding here means a port conflict raises a plain OSError right here.
+        # Deliberately do NOT set SO_REUSEADDR: on Windows it lets a second
+        # socket bind to a port a live listener already holds (unlike on
+        # Linux, where it only affects TIME_WAIT reuse), which would silently
+        # defeat the port-conflict detection this fix exists to provide.
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("0.0.0.0", self.port))
+        sock.listen(_LISTEN_BACKLOG)
+        sock.setblocking(False)
+        self.port = sock.getsockname()[1]
+
+        self._task = asyncio.create_task(self._server.serve(sockets=[sock]))
         while not self._server.started:
             if self._task.done():
-                self._task.result()  # surface bind errors: fail fast, compose restarts
+                self._task.result()  # surface any other startup errors
                 raise RuntimeError("health server exited before startup")
             await asyncio.sleep(0.01)
         self.port = self._server.servers[0].sockets[0].getsockname()[1]
