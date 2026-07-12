@@ -114,9 +114,14 @@ validation with domain allowlists, and least-privilege Postgres roles.
 
 ## 5. Postgres role split
 
-- New init script `deploy/db-init/01-roles.sql`, mounted via
-  `docker-entrypoint-initdb.d` in **both** docker-compose and the Helm
-  Postgres StatefulSet, creating:
+- New init script `deploy/chart/jobprocessor/files/db-init/01-roles.sh` — a
+  single source shared by docker-compose (bind-mounted at
+  `docker-entrypoint-initdb.d`) and the Helm chart (embedded via
+  `.Files.Get` in the Postgres StatefulSet, Task 7). sclorg's
+  `postgresql-start/` hook runs it on **every** start, which handles
+  existing volumes automatically; docker-compose's `postgres:16` image only
+  runs `docker-entrypoint-initdb.d` on a fresh data directory (see below).
+  The script creates:
   - **`jobs_migrator`** — owns the application database/schema; Alembic
     (`migrate-job.yaml`) connects as this role and may run DDL.
   - **`jobs_app`** — runtime role: `SELECT/INSERT/UPDATE/DELETE` on all tables
@@ -131,15 +136,18 @@ validation with domain allowlists, and least-privilege Postgres roles.
     jobs_app` and `GRANT USAGE ON ALL SEQUENCES ...` alongside the default
     privileges. On a fresh database these grant over zero tables (roles are
     created before Alembic runs) — they exist for the re-run path below.
-- **Existing databases:** `docker-entrypoint-initdb.d` only executes on a
-  fresh data directory, so the init script alone cannot migrate a live
-  deployment. For existing volumes the script must be applied manually (or
-  via a one-off Helm hook Job), preceded by
-  `REASSIGN OWNED BY jobs TO jobs_migrator` (pre-existing tables are owned by
-  the old `jobs` role, and `ALTER DEFAULT PRIVILEGES FOR ROLE jobs_migrator`
-  only covers objects that role creates in the future). The explicit
-  `GRANT ... ON ALL TABLES` statements above are what make this re-run pick up
-  the pre-existing tables.
+- **Existing databases:** on Helm, sclorg's `postgresql-start/` hook re-runs
+  the script on every pod start, so existing volumes pick up the role split
+  automatically — no manual step needed there. On docker-compose,
+  `docker-entrypoint-initdb.d` only executes on a fresh data directory, so
+  the init script alone cannot migrate a live volume; the manual
+  `REASSIGN OWNED BY jobs TO jobs_migrator` path (pre-existing tables are
+  owned by the old `jobs` role, and `ALTER DEFAULT PRIVILEGES FOR ROLE
+  jobs_migrator` only covers objects that role creates in the future) is
+  needed only for compose volumes predating the split — or, in dev, simply
+  `docker compose down -v` to start from a fresh data directory. The
+  explicit `GRANT ... ON ALL TABLES` statements above are what make either
+  re-run path pick up the pre-existing tables.
 - **Wiring:**
   - Helm: `migrate-job.yaml` gets the migrator DSN; `api`, `worker`, `ticker`
     deployments and `users-sync-job` (DML only) get the app DSN. Both DSNs and

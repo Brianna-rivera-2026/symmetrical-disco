@@ -5,8 +5,11 @@ services:
       POSTGRES_USER: jobs
       POSTGRES_PASSWORD: jobs
       POSTGRES_DB: jobs
+      APP_DB_PASSWORD: jobs_app
+      MIGRATOR_DB_PASSWORD: jobs_migrator
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./deploy/chart/jobprocessor/files/db-init/01-roles.sh:/docker-entrypoint-initdb.d/01-roles.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U jobs"]
       interval: 3s
@@ -33,7 +36,7 @@ services:
     image: jobprocessor-app:${APP_TAG:-dev}
     command: alembic upgrade head
     environment:
-      DATABASE_URL: postgresql+psycopg://jobs:jobs@postgres:5432/jobs
+      DATABASE_URL: postgresql+psycopg://jobs_migrator:jobs_migrator@postgres:5432/jobs
       REDIS_URL: redis://redis:6379/0
     depends_on:
       postgres:
@@ -44,7 +47,7 @@ services:
     image: jobprocessor-app:${APP_TAG:-dev}
     command: python -m app.users.sync
     environment:
-      DATABASE_URL: postgresql+psycopg://jobs:jobs@postgres:5432/jobs
+      DATABASE_URL: postgresql+psycopg://jobs_app:jobs_app@postgres:5432/jobs
       REDIS_URL: redis://redis:6379/0
     # Dev-only fixed keys, inlined here instead of a git-ignored secret file
     # -- fine to commit since these are throwaway local values, never real
@@ -62,8 +65,10 @@ services:
     build: .
     image: jobprocessor-app:${APP_TAG:-dev}
     environment:
-      DATABASE_URL: postgresql+psycopg://jobs:jobs@postgres:5432/jobs
+      DATABASE_URL: postgresql+psycopg://jobs_app:jobs_app@postgres:5432/jobs
       REDIS_URL: redis://redis:6379/0
+      WEBHOOK_ALLOWED_HOSTS: '["example.com"]'
+      EMAIL_ALLOWED_DOMAINS: '["example.com"]'
     ports:
       - "8000:8000"
     stop_grace_period: 30s
@@ -89,9 +94,11 @@ services:
     restart: on-failure
     stop_grace_period: 50s
     environment:
-      DATABASE_URL: postgresql+psycopg://jobs:jobs@postgres:5432/jobs
+      DATABASE_URL: postgresql+psycopg://jobs_app:jobs_app@postgres:5432/jobs
       REDIS_URL: redis://redis:6379/0
       HEALTH_PORT: "8001"
+      WEBHOOK_ALLOWED_HOSTS: '["example.com"]'
+      EMAIL_ALLOWED_DOMAINS: '["example.com"]'
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health').status==200 else 1)"]
@@ -112,9 +119,11 @@ services:
     restart: on-failure
     stop_grace_period: 15s
     environment:
-      DATABASE_URL: postgresql+psycopg://jobs:jobs@postgres:5432/jobs
+      DATABASE_URL: postgresql+psycopg://jobs_app:jobs_app@postgres:5432/jobs
       REDIS_URL: redis://redis:6379/0
       HEALTH_PORT: "8001"
+      WEBHOOK_ALLOWED_HOSTS: '["example.com"]'
+      EMAIL_ALLOWED_DOMAINS: '["example.com"]'
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health').status==200 else 1)"]
