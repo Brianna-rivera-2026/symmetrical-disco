@@ -60,3 +60,47 @@ def test_disabled_flag_bypasses_limits(client):
     # `client` fixture has rate_limit_enabled=False
     for _ in range(10):
         assert client.get("/jobs").status_code == 200
+
+
+@pytest.fixture
+async def cross_group_client(pg_engine, database_url, redis_container):
+    """Distinct low limit on "stats" vs the default-high "read" limit, to
+    prove the two groups don't share a rate-limit bucket for the same user
+    (the whole reason `_GroupRateLimiter` folds the group name into its
+    Redis key instead of reusing fastapi-limiter's broken route lookup)."""
+    factory = make_session_factory(pg_engine)
+    async with factory() as session:
+        await repo.upsert_user(session, "default-user", hash_key(DEFAULT_TEST_KEY))
+        await session.commit()
+    redis_url = f"redis://{redis_container.get_container_host_ip()}:{redis_container.get_exposed_port(6379)}/0"
+    settings = Settings(
+        database_url=database_url,
+        redis_url=redis_url,
+        rate_limit_enabled=True,
+        stats_rate_limit_per_min=3,
+        webhook_allowed_hosts=["x.test"],
+        email_allowed_domains=["b.com"],
+    )
+    app = create_app(settings)
+    with TestClient(app) as c:
+        yield c
+    async with pg_engine.begin() as conn:
+        await conn.execute(text("TRUNCATE TABLE jobs, users"))
+    real_redis = create_redis_client(redis_url)
+    try:
+        await real_redis.flushdb()
+    finally:
+        await real_redis.aclose()
+
+
+def test_groups_have_independent_counters(cross_group_client):
+    headers = {"X-API-Key": DEFAULT_TEST_KEY}
+    for _ in range(3):
+        assert cross_group_client.get("/stats", headers=headers).status_code == 200
+    r = cross_group_client.get("/stats", headers=headers)
+    assert r.status_code == 429
+
+    # Same user, different group ("read", default 120/min) — must be
+    # unaffected by the exhausted "stats" bucket.
+    r = cross_group_client.get("/jobs", headers=headers)
+    assert r.status_code == 200

@@ -1,6 +1,7 @@
 """Per-user rate limiting (spec §1): fastapi-limiter dependencies keyed by
 API-key hash, falling back to client IP for unauthenticated requests."""
 
+import redis as pyredis
 from fastapi import Request, Response
 from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
@@ -50,7 +51,18 @@ class _GroupRateLimiter(RateLimiter):
         callback = self.callback or FastAPILimiter.http_callback
         rate_key = await identifier(request)
         key = f"{FastAPILimiter.prefix}:{self.group}:{rate_key}"
-        pexpire = await self._check(key)
+        try:
+            pexpire = await self._check(key)
+        except pyredis.exceptions.NoScriptError:
+            # Mirrors upstream RateLimiter.__call__: the Lua script can fall
+            # out of Redis's script cache (restart, SCRIPT FLUSH, failover to
+            # a replica that never loaded it) — reload it and retry once
+            # instead of raising and turning every rate-limited request into
+            # a 500 until the process restarts.
+            FastAPILimiter.lua_sha = await FastAPILimiter.redis.script_load(
+                FastAPILimiter.lua_script
+            )
+            pexpire = await self._check(key)
         if pexpire != 0:
             await callback(request, response, pexpire)
 
