@@ -81,11 +81,11 @@ spec:
       ports:
         - { protocol: TCP, port: 6379 }
     {{- if .Values.otel.enabled }}
-    - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/component: opentelemetry-collector
-      ports:
+    # The OTLP collector is run independently by the platform/observability
+    # team (outside this chart, possibly a different namespace or even off
+    # cluster) -- its pod labels aren't ours to select on, so this allows
+    # egress to otel.exporterEndpoint's port from any destination.
+    - ports:
         - { protocol: TCP, port: 4317 }
     {{- end }}
 ---
@@ -195,27 +195,3 @@ spec:
               app.kubernetes.io/component: postgres
       ports:
         - { protocol: TCP, port: 5432 }
-{{- if .Values.otel.enabled }}
----
-# ---------- otel collector: in from apps ----------
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: {{ include "jobprocessor.fullname" . }}-otel-ingress
-  labels:
-    {{- $labels | nindent 4 }}
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/component: opentelemetry-collector
-  policyTypes: [Ingress]
-  ingress:
-    - from:
-        - podSelector:
-            matchExpressions:
-              - key: app.kubernetes.io/component
-                operator: In
-                values: [api, worker, ticker]
-      ports:
-        - { protocol: TCP, port: 4317 }
-{{- end }}

@@ -24,7 +24,11 @@ keda:
 
 otel:
   enabled: false
-  exporterEndpoint: "" # non-empty => collector forwards OTLP there; empty => debug exporter only
+  # Required (non-empty) when enabled: OTLP/gRPC endpoint of the cluster's
+  # own OpenTelemetry collector, run independently by the platform/observability
+  # team -- this chart does not deploy a collector. Example:
+  # http://otel-collector.observability.svc.cluster.local:4317
+  exporterEndpoint: ""
 
 postgres:
   image: quay.io/sclorg/postgresql-16-c9s:latest

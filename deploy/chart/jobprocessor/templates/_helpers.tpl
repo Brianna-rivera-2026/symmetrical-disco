@@ -68,10 +68,13 @@ rediss://:$(REDIS_PASSWORD)@{{ include "jobprocessor.redisHost" . }}:6379/0?ssl_
 - name: DB_DISABLE_PREPARED_STATEMENTS
   value: "true"
 {{- if .Values.otel.enabled }}
+{{- if not .Values.otel.exporterEndpoint }}
+{{- fail "otel.exporterEndpoint must be set (to the cluster's existing OpenTelemetry collector) when otel.enabled=true" }}
+{{- end }}
 - name: OTEL_ENABLED
   value: "true"
 - name: OTEL_EXPORTER_OTLP_ENDPOINT
-  value: http://{{ include "jobprocessor.fullname" . }}-otel-collector.{{ .Release.Namespace }}.svc:4317
+  value: {{ .Values.otel.exporterEndpoint | quote }}
 {{- end }}
 {{- end }}
 

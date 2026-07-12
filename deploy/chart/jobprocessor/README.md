@@ -3,7 +3,7 @@
 ## Prerequisites (cluster administrators)
 Installed once per cluster via OperatorHub/OLM — this chart never manages operators:
 - **Custom Metrics Autoscaler** (KEDA, `openshift-keda` namespace) — required only when `keda.enabled=true`. CRDs: `scaledobjects.keda.sh/v1alpha1`, `triggerauthentications.keda.sh/v1alpha1`.
-- **Red Hat build of OpenTelemetry** — required only when `otel.enabled=true`. CRD: `opentelemetrycollectors.opentelemetry.io/v1beta1`.
+- **An existing OpenTelemetry collector** — required only when `otel.enabled=true`. This chart does not deploy a collector; it assumes the platform/observability team already runs one (however it's provisioned — e.g. via the Red Hat build of OpenTelemetry operator, or otherwise) and exports directly to it. Set `otel.exporterEndpoint` to that collector's OTLP/gRPC endpoint (e.g. `http://otel-collector.observability.svc.cluster.local:4317`); `helm template` fails fast if `otel.enabled=true` and `otel.exporterEndpoint` is empty. Because the collector isn't ours, the app-egress NetworkPolicy opens port 4317 to any destination rather than a specific pod selector.
 
 ## Install
     deploy/openshift/init-secrets.sh <namespace> jobprocessor-api-user-keys alice bob
