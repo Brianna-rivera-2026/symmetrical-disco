@@ -46,8 +46,14 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://jobs:jobs@postgres:5432/jobs
       REDIS_URL: redis://redis:6379/0
-    secrets:
-      - api_user_keys
+    # Dev-only fixed keys, inlined here instead of a git-ignored secret file
+    # -- fine to commit since these are throwaway local values, never real
+    # credentials (production uses real generated keys in an OpenShift
+    # Secret; see deploy/openshift/init-secrets.sh). Mounted at the path
+    # Settings.api_user_keys_file already defaults to.
+    configs:
+      - source: api_user_keys
+        target: /run/secrets/api_user_keys
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -126,6 +132,7 @@ volumes:
   pgdata:
   redisdata:
 
-secrets:
+configs:
   api_user_keys:
-    file: ./secrets/api_user_keys.json
+    content: |
+      {"alice": "dev-alice-local-only", "bob": "dev-bob-local-only"}

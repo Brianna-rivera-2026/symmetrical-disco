@@ -236,12 +236,14 @@ reaches the database, and only usernames are logged.
 
 ### Local development
 
-1. `cp secrets/api_user_keys.example.json secrets/api_user_keys.json` and fill
-   in real users/keys (generate one with
-   `python -c "import secrets; print(secrets.token_urlsafe(32))"`).
-2. `docker compose up` — `users-sync` runs automatically after migrations.
+`docker-compose.yml` hardcodes two fixed dev-only keys directly (via an
+inline `configs:` entry, no secret file) — `alice` / `dev-alice-local-only`
+and `bob` / `dev-bob-local-only`. Safe to commit: these are throwaway local
+values, never real credentials. `docker compose up` runs `users-sync`
+automatically after migrations, so both users are ready to use immediately.
 
-**Add or rotate a key:** edit `secrets/api_user_keys.json`, then
+**Add, rotate, or remove a key:** edit the inline JSON under `configs:
+api_user_keys` at the bottom of `docker-compose.yml`, then
 `docker compose up users-sync` to re-sync (upsert-only: existing users not in
 the file are left untouched, never auto-deleted).
 
