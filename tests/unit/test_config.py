@@ -105,3 +105,12 @@ def test_worker_concurrency_default_and_env(monkeypatch):
     monkeypatch.setenv("WORKER_CONCURRENCY", "3")
     s2 = Settings(database_url="postgresql+psycopg://x/y", redis_url="redis://x")
     assert s2.worker_concurrency == 3
+
+
+def test_new_deployment_settings_defaults():
+    settings = Settings(
+        database_url="postgresql+psycopg://u:p@h/db", redis_url="redis://h"
+    )
+    assert settings.db_pool_size == 5
+    assert settings.db_disable_prepared_statements is False
+    assert settings.worker_max_rss_mb is None

@@ -35,7 +35,9 @@ log = logging.getLogger("app.ticker")
 _tracer = trace.get_tracer("app.ticker")
 
 
-async def promote_due(session: AsyncSession, client: redis.Redis, settings: Settings) -> int:
+async def promote_due(
+    session: AsyncSession, client: redis.Redis, settings: Settings
+) -> int:
     now_epoch = time.time()
     ids = await delayed.due_job_ids(
         client, settings.delayed_zset, now_epoch, settings.ticker_batch_size
@@ -144,7 +146,9 @@ async def _reap_one(session, client, settings, stream, message_id, job_id) -> No
     await client.xack(stream, settings.consumer_group, message_id)
 
 
-async def reap_stale(session: AsyncSession, client: redis.Redis, settings: Settings) -> int:
+async def reap_stale(
+    session: AsyncSession, client: redis.Redis, settings: Settings
+) -> int:
     min_idle = int(settings.visibility_timeout_s * 1000)
     handled = 0
     for stream in settings.ordered_streams:
@@ -274,9 +278,15 @@ def _make_sync_observability_resources(settings: Settings):
     return engine, factory, client
 
 
-async def run_forever(settings: Settings, *, stop: Callable[[], bool] | None = None) -> None:
+async def run_forever(
+    settings: Settings, *, stop: Callable[[], bool] | None = None
+) -> None:
     configure_telemetry(settings, "jobs-ticker")
-    engine = make_engine(settings.database_url)
+    engine = make_engine(
+        settings.database_url,
+        pool_size=settings.db_pool_size,
+        disable_prepared_statements=settings.db_disable_prepared_statements,
+    )
     session_factory = make_session_factory(engine)
     client = create_redis_client(settings.redis_url)
 

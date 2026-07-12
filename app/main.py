@@ -19,7 +19,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging(settings.log_level)
     configure_telemetry(settings, "jobs-api")
 
-    engine = make_engine(settings.database_url)
+    engine = make_engine(
+        settings.database_url,
+        pool_size=settings.db_pool_size,
+        disable_prepared_statements=settings.db_disable_prepared_statements,
+    )
     session_factory = make_session_factory(engine)
     redis_client = create_redis_client(settings.redis_url)
 

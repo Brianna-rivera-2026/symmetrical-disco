@@ -229,5 +229,3 @@ async def test_gather_stats_tolerates_missing_stream_groups():
 
     assert stats.jobs.by_status == {s.value: 0 for s in JobStatus}
     assert stats.jobs.oldest_pending_age_seconds is None
-
-

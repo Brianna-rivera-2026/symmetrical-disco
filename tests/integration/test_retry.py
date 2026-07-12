@@ -44,7 +44,9 @@ async def test_retry_delayed_parks_in_zset(db_session, redis_client, test_settin
 
 
 @pytest.mark.asyncio
-async def test_retry_permanent_fail_at_max_attempts(db_session, redis_client, test_settings):
+async def test_retry_permanent_fail_at_max_attempts(
+    db_session, redis_client, test_settings
+):
     job = await repo.create_job(
         db_session, JobType.webhook, {"url": "https://x.test"}, max_attempts=1
     )

@@ -41,5 +41,7 @@ async def test_webhook_failure_branch(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_handler_dispatches_by_type():
-    out = await run_handler(JobType.email, EmailPayload(to="a@b.com", subject="Hi"), None)
+    out = await run_handler(
+        JobType.email, EmailPayload(to="a@b.com", subject="Hi"), None
+    )
     assert "message_id" in out

@@ -120,12 +120,14 @@ async def gather_stats(
         workers=live_worker_count(consumers, cutoff_ms),
     )
 
-    status_rows = (await session.execute(
-        select(Job.status, func.count()).group_by(Job.status)
-    )).all()
-    min_created = (await session.execute(
-        select(func.min(Job.created_at)).where(Job.status == JobStatus.pending)
-    )).scalar_one()
+    status_rows = (
+        await session.execute(select(Job.status, func.count()).group_by(Job.status))
+    ).all()
+    min_created = (
+        await session.execute(
+            select(func.min(Job.created_at)).where(Job.status == JobStatus.pending)
+        )
+    ).scalar_one()
     jobs = JobStats(
         by_status=zero_fill_status_counts(status_rows),
         oldest_pending_age_seconds=pending_age_seconds(

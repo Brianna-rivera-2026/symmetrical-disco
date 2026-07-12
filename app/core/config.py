@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     retry_backoff_schedule: list[int] = [0, 30, 120]
     cancel_poll_interval_s: float = 2.0
     worker_concurrency: int = 10
+    db_pool_size: int = 5
+    db_disable_prepared_statements: bool = False
+    worker_max_rss_mb: int | None = None
     auth_cache_ttl_s: float = 60.0
     otel_enabled: bool = False
     otel_exporter_otlp_endpoint: str = "http://localhost:4317"

@@ -48,7 +48,11 @@ async def sync_users(session: AsyncSession, keys: dict[str, str]) -> int:
 async def _run_async(settings: Settings) -> int:
     configure_telemetry(settings, "users-sync")
     tracer = trace.get_tracer("app.users.sync")
-    engine = make_engine(settings.database_url)
+    engine = make_engine(
+        settings.database_url,
+        pool_size=settings.db_pool_size,
+        disable_prepared_statements=settings.db_disable_prepared_statements,
+    )
     exit_code = 0
     try:
         with tracer.start_as_current_span("users.sync") as span:

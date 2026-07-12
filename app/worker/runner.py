@@ -236,7 +236,11 @@ async def run_forever(
     settings: Settings, *, stop: Callable[[], bool] | None = None
 ) -> int:
     configure_telemetry(settings, "jobs-worker", instance_id=CONSUMER_NAME)
-    engine = make_engine(settings.database_url)
+    engine = make_engine(
+        settings.database_url,
+        pool_size=settings.db_pool_size,
+        disable_prepared_statements=settings.db_disable_prepared_statements,
+    )
     session_factory = make_session_factory(engine)
     client = create_redis_client(settings.redis_url)
 
