@@ -1,0 +1,82 @@
+{{- include "jobprocessor.validateConnections" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "jobprocessor.fullname" . }}-pgbouncer
+  labels:
+    {{- include "jobprocessor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pgbouncer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "jobprocessor.labels" . | nindent 6 }}
+      app.kubernetes.io/component: pgbouncer
+  template:
+    metadata:
+      labels:
+        {{- include "jobprocessor.labels" . | nindent 8 }}
+        app.kubernetes.io/component: pgbouncer
+    spec:
+      containers:
+        - name: pgbouncer
+          image: {{ .Values.pgbouncer.image }}
+          env:
+            - name: DB_HOST
+              value: {{ include "jobprocessor.postgresHost" . | quote }}
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USER
+              value: {{ .Values.postgres.user | quote }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "jobprocessor.fullname" . }}-credentials
+                  key: db-password
+            - name: DB_NAME
+              value: {{ .Values.postgres.database | quote }}
+            - name: AUTH_TYPE
+              value: scram-sha-256
+            - name: POOL_MODE
+              value: transaction
+            - name: DEFAULT_POOL_SIZE
+              value: {{ .Values.pgbouncer.defaultPoolSize | quote }}
+            - name: MAX_CLIENT_CONN
+              value: {{ .Values.pgbouncer.maxClientConn | quote }}
+            - name: LISTEN_PORT
+              value: "6432"
+            - name: SERVER_TLS_SSLMODE
+              value: verify-full
+            - name: SERVER_TLS_CA_FILE
+              value: /etc/pki/service-ca/ca.crt
+            {{- if .Values.tls.appToPgbouncer }}
+            - name: CLIENT_TLS_SSLMODE
+              value: require
+            - name: CLIENT_TLS_CERT_FILE
+              value: /certs/tls.crt
+            - name: CLIENT_TLS_KEY_FILE
+              value: /certs/tls.key
+            {{- end }}
+          ports:
+            - containerPort: 6432
+          readinessProbe:
+            tcpSocket:
+              port: 6432
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 6432
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          volumeMounts:
+            {{- include "jobprocessor.caVolumeMount" . | nindent 12 }}
+            - name: tls
+              mountPath: /certs
+              readOnly: true
+      volumes:
+        {{- include "jobprocessor.caVolume" . | nindent 8 }}
+        - name: tls
+          secret:
+            secretName: {{ include "jobprocessor.fullname" . }}-pgbouncer-tls
+            defaultMode: 0640

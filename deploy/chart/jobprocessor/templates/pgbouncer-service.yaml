@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "jobprocessor.fullname" . }}-pgbouncer
+  labels:
+    {{- include "jobprocessor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pgbouncer
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: {{ include "jobprocessor.fullname" . }}-pgbouncer-tls
+spec:
+  selector:
+    {{- include "jobprocessor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pgbouncer
+  ports:
+    - name: pgbouncer
+      port: 6432
+      targetPort: 6432
