@@ -74,9 +74,23 @@ spec:
             - name: tls
               mountPath: /certs
               readOnly: true
+            # OpenShift's restricted SCC runs the container as an arbitrary
+            # non-root UID; the image's entrypoint writes userlist.txt into
+            # /etc/pgbouncer, which is read-only in the image otherwise.
+            - name: pgbouncer-etc
+              mountPath: /etc/pgbouncer
+            - name: pgbouncer-ini
+              mountPath: /etc/pgbouncer/pgbouncer.ini
+              subPath: pgbouncer.ini
+              readOnly: true
       volumes:
         {{- include "jobprocessor.caVolume" . | nindent 8 }}
         - name: tls
           secret:
             secretName: {{ include "jobprocessor.fullname" . }}-pgbouncer-tls
             defaultMode: 0640
+        - name: pgbouncer-etc
+          emptyDir: {}
+        - name: pgbouncer-ini
+          configMap:
+            name: {{ include "jobprocessor.fullname" . }}-pgbouncer-ini

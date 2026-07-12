@@ -207,3 +207,77 @@ of "message age > fixed threshold":
 **Trade-off:** adds a periodic write per in-flight job (extra Redis/Postgres
 traffic) and a little worker-side bookkeeping, in exchange for tighter,
 per-job-accurate crash detection than a one-size-fits-all timeout.
+
+---
+
+## 6. OpenShift (CRC) Live Verification — Task 15
+
+Ran the full chart against a local CRC cluster (KEDA + Red Hat OpenTelemetry
+operators installed via OLM Subscription since OperatorHub's UI wasn't
+scripted for this pass; equivalent to the manual admin step in the chart
+README). All checks in the plan's Task 15 passed. Three real OpenShift
+incompatibilities surfaced that the plan's design couldn't have caught
+without a live cluster, all fixed in the chart:
+
+**1. `edoburu/pgbouncer`'s entrypoint hardcodes `user = postgres` in the
+generated `pgbouncer.ini`**, telling pgbouncer to `setuid` after starting.
+OpenShift's restricted SCC runs every container as an arbitrary non-root UID
+with no setuid capability, so pgbouncer crash-looped with `failed to assume
+identity of user 'postgres': Operation not permitted`. Fix: ship a
+hand-written `pgbouncer.ini` via ConfigMap (`pgbouncer-ini-configmap.yaml`),
+mounted by `subPath` onto the writable `emptyDir` at `/etc/pgbouncer` so the
+entrypoint's separate (and still-needed) `userlist.txt`-writing logic keeps
+working, while its ini-autogeneration path is skipped entirely because the
+file already exists.
+
+**2. CRI-O bind-mounts host RHEL entitlement secrets (`/run/secrets/rhsm`,
+`/run/secrets/redhat.repo`) into every container**, shadowing any pod
+volume a chart author mounts at that exact path. The `users-sync` hook Job
+originally mounted the API-user-keys Secret at `/run/secrets` (matching
+`Settings.api_user_keys_file`'s default), so the app's `open()` call saw the
+host's entitlement directory instead of the mounted key and failed with
+`FileNotFoundError`. Fix: mount the secret at `/etc/jobprocessor-secrets`
+instead and point `Settings` at it via `API_USER_KEYS_FILE` env var on the
+Job, rather than changing the app's default (keeps the default valid for
+non-OpenShift deployments).
+
+**3. KEDA's `ScaledObject` never went `Ready`** (`connection to redis failed:
+dial tcp ... i/o timeout`, then a DNS `no such host` before that). The
+`keda-operator` pod that actually polls Redis for stream lag lives in a
+different namespace (`openshift-keda`), and the `redis-ingress`
+NetworkPolicy only admitted same-namespace pods matching `component in
+{api,worker,ticker}` — cross-namespace traffic was silently dropped by the
+default-deny posture. Fix: added a `keda.enabled`-gated ingress rule to
+`redis-ingress` allowing `namespaceSelector: kubernetes.io/metadata.name=
+openshift-keda` + `podSelector: app=keda-operator` on port 6379.
+
+**4. (Anticipated, not a bug) No `podLabels`/`additionalLabels` field
+exists on the installed `OpenTelemetryCollector` CRD** (checked live via `oc
+explain opentelemetrycollector.spec --recursive`), confirming the plan's
+Task 13 fallback: NetworkPolicies target the operator's own default pod
+label (`app.kubernetes.io/component: opentelemetry-collector`) instead of a
+custom label from the CR.
+
+**Verified live and working as designed, no further changes needed:**
+TLS end-to-end (Postgres `pg_stat_ssl.ssl = t` for all PgBouncer
+connections, Redis rejects plaintext and accepts TLS+auth, PgBouncer
+presents/verifies serving certs both sides); default-deny NetworkPolicy
+(an unrelated scratch pod cannot reach Postgres or Redis; the api pod
+cannot reach the public internet); a real job submitted through the
+edge-TLS Route reaches `completed` via the full API → Redis Streams →
+worker path; the memory recycler (`worker.maxRssMb=30`) logs
+`worker.recycling`, flips readiness, and exits 0 for a clean pod
+replacement; KEDA scales the worker Deployment from 1 to 6 (the configured
+`maxReplicas` ceiling — never past it) under a 200-job burst and scales
+back down to 1 once the backlog drains; the OTel collector's debug exporter
+shows live traces/metrics/logs from the app pods.
+
+**Unrelated environment note:** the CRC VM's disk hit the kubelet
+`DiskPressure` eviction threshold (~85% of its 32GB image) partway through
+this pass, from image pulls plus exited-container layers accumulated across
+several failed/retried installs — not caused by the chart. Freed by
+`crictl rmi --prune` (safe: only removed the OLM catalog index images,
+already-installed operators are unaffected) over the VM's SSH port
+(`crc podman-env` reveals the key/port; `oc debug node` itself couldn't
+schedule while disk pressure was active — a chicken-and-egg worth knowing
+about if this recurs).

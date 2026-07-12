@@ -84,7 +84,7 @@ spec:
     - to:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/component: otel-collector
+              app.kubernetes.io/component: opentelemetry-collector
       ports:
         - { protocol: TCP, port: 4317 }
     {{- end }}
@@ -161,6 +161,20 @@ spec:
                 values: [api, worker, ticker]
       ports:
         - { protocol: TCP, port: 6379 }
+    {{- if .Values.keda.enabled }}
+    # KEDA's operator lives in a different namespace (openshift-keda) and
+    # polls Redis directly for stream lag -- verified live on CRC that
+    # without this, the ScaledObject never goes Ready (dial tcp timeout).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-keda
+          podSelector:
+            matchLabels:
+              app: keda-operator
+      ports:
+        - { protocol: TCP, port: 6379 }
+    {{- end }}
 ---
 # ---------- hook jobs -> postgres ----------
 apiVersion: networking.k8s.io/v1
@@ -193,7 +207,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/component: otel-collector
+      app.kubernetes.io/component: opentelemetry-collector
   policyTypes: [Ingress]
   ingress:
     - from:

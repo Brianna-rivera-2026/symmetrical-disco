@@ -33,10 +33,16 @@ spec:
               value: {{ include "jobprocessor.directDatabaseUrl" . | quote }}
             - name: REDIS_URL
               value: rediss://unused:6379/0
+            # CRI-O bind-mounts RHEL entitlement secrets over /run/secrets on
+            # every container (host-level default mount), shadowing any pod
+            # volume mounted at that exact path — verified live on CRC. Mount
+            # elsewhere and point Settings at it instead.
+            - name: API_USER_KEYS_FILE
+              value: /etc/jobprocessor-secrets/api_user_keys
           volumeMounts:
             {{- include "jobprocessor.caVolumeMount" . | nindent 12 }}
             - name: api-user-keys
-              mountPath: /run/secrets
+              mountPath: /etc/jobprocessor-secrets
               readOnly: true
       volumes:
         {{- include "jobprocessor.caVolume" . | nindent 8 }}
@@ -45,4 +51,4 @@ spec:
             secretName: {{ .Values.secrets.apiUserKeysSecret }}
             items:
               - key: api_user_keys.json
-                path: api_user_keys   # matches Settings.api_user_keys_file
+                path: api_user_keys

@@ -9,15 +9,10 @@ metadata:
 spec:
   mode: deployment
   replicas: 1
-  # propagate the component label to collector pods so NetworkPolicies match.
-  # `podLabels` is the field documented on recent Red Hat build of OpenTelemetry
-  # / opentelemetry-operator CRD versions for merging extra labels onto the
-  # collector's own pods (distinct from `metadata.labels` above, which only
-  # labels the CR object itself). Could not verify against a live CRD schema
-  # in this offline environment -- see task-13-report.md for the fallback if
-  # this field doesn't exist on the installed operator version.
-  podLabels:
-    app.kubernetes.io/component: otel-collector
+  # No CRD field exists (checked live against the installed operator via
+  # `oc explain opentelemetrycollector.spec --recursive`) to add extra labels
+  # to the collector's own pods, so NetworkPolicies target the operator's
+  # own default labels instead (app.kubernetes.io/component: opentelemetry-collector).
   config:
     receivers:
       otlp:
