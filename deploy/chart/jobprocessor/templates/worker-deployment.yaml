@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "jobprocessor.fullname" . }}-worker
+  labels:
+    {{- include "jobprocessor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  {{- if not .Values.keda.enabled }}
+  replicas: {{ .Values.worker.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "jobprocessor.labels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        {{- include "jobprocessor.labels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+    spec:
+      # bounds the recycler/SIGTERM drain (spec: stuck job can't wedge the pod)
+      terminationGracePeriodSeconds: 50
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "app.worker"]
+          env:
+            {{- include "jobprocessor.appEnv" . | nindent 12 }}
+            - name: DB_POOL_SIZE
+              value: {{ .Values.worker.dbPoolSize | quote }}
+            - name: WORKER_CONCURRENCY
+              value: {{ .Values.worker.concurrency | quote }}
+            - name: WORKER_MAX_RSS_MB
+              value: {{ .Values.worker.maxRssMb | quote }}
+            - name: HEALTH_PORT
+              value: "8001"
+          ports:
+            - containerPort: 8001
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8001
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          volumeMounts:
+            {{- include "jobprocessor.caVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "jobprocessor.caVolume" . | nindent 8 }}
