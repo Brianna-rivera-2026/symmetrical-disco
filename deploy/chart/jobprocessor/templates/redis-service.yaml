@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "jobprocessor.fullname" . }}-redis
+  labels:
+    {{- include "jobprocessor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: {{ include "jobprocessor.fullname" . }}-redis-tls
+spec:
+  clusterIP: None
+  selector:
+    {{- include "jobprocessor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379

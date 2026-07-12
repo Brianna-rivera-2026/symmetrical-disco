@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "jobprocessor.fullname" . }}-redis
+  labels:
+    {{- include "jobprocessor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  serviceName: {{ include "jobprocessor.fullname" . }}-redis
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "jobprocessor.labels" . | nindent 6 }}
+      app.kubernetes.io/component: redis
+  template:
+    metadata:
+      labels:
+        {{- include "jobprocessor.labels" . | nindent 8 }}
+        app.kubernetes.io/component: redis
+    spec:
+      containers:
+        - name: redis
+          image: {{ .Values.redis.image }}
+          command:
+            - sh
+            - -c
+            # port 0 disables the plaintext listener: TLS-only, per spec.
+            - >
+              exec redis-server
+              --requirepass "$REDIS_PASSWORD"
+              --appendonly yes --appendfsync everysec
+              --port 0 --tls-port 6379
+              --tls-cert-file /certs/tls.crt
+              --tls-key-file /certs/tls.key
+              --tls-auth-clients no
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "jobprocessor.fullname" . }}-credentials
+                  key: redis-password
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli --tls --cacert /certs/tls.crt -a "$REDIS_PASSWORD" ping | grep -q PONG
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tls
+              mountPath: /certs
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ include "jobprocessor.fullname" . }}-redis-tls
+            defaultMode: 0640
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.redis.storage }}
