@@ -1,0 +1,39 @@
+{{- if .Values.keda.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ include "jobprocessor.fullname" . }}-redis-auth
+  labels:
+    {{- include "jobprocessor.labels" . | nindent 4 }}
+spec:
+  secretTargetRef:
+    - parameter: password
+      name: {{ include "jobprocessor.fullname" . }}-credentials
+      key: redis-password
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "jobprocessor.fullname" . }}-worker
+  labels:
+    {{- include "jobprocessor.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: {{ include "jobprocessor.fullname" . }}-worker
+  minReplicaCount: 1
+  maxReplicaCount: {{ .Values.keda.maxReplicas }}
+  triggers:
+    {{- range $stream := list "jobs:stream:high" "jobs:stream:normal" "jobs:stream:low" }}
+    - type: redis-streams
+      metadata:
+        address: {{ include "jobprocessor.redisHost" $ }}:6379
+        stream: {{ $stream }}
+        consumerGroup: workers
+        lagCount: {{ $.Values.keda.lagCount | quote }}
+        activationLagCount: "1"
+        enableTLS: "true"
+        unsafeSsl: {{ $.Values.keda.unsafeSsl | quote }}
+      authenticationRef:
+        name: {{ include "jobprocessor.fullname" $ }}-redis-auth
+    {{- end }}
+{{- end }}

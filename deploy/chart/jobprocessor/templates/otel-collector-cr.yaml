@@ -1,0 +1,53 @@
+{{- if .Values.otel.enabled }}
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: {{ include "jobprocessor.fullname" . }}-otel
+  labels:
+    {{- include "jobprocessor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+spec:
+  mode: deployment
+  replicas: 1
+  # propagate the component label to collector pods so NetworkPolicies match.
+  # `podLabels` is the field documented on recent Red Hat build of OpenTelemetry
+  # / opentelemetry-operator CRD versions for merging extra labels onto the
+  # collector's own pods (distinct from `metadata.labels` above, which only
+  # labels the CR object itself). Could not verify against a live CRD schema
+  # in this offline environment -- see task-13-report.md for the fallback if
+  # this field doesn't exist on the installed operator version.
+  podLabels:
+    app.kubernetes.io/component: otel-collector
+  config:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+    processors:
+      batch: {}
+    exporters:
+      debug:
+        verbosity: basic
+      {{- if .Values.otel.exporterEndpoint }}
+      otlp:
+        endpoint: {{ .Values.otel.exporterEndpoint }}
+        tls:
+          insecure: true
+      {{- end }}
+    service:
+      pipelines:
+        {{- $exporters := ternary (list "debug" "otlp") (list "debug") (ne .Values.otel.exporterEndpoint "") }}
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: {{ $exporters | toJson }}
+        metrics:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: {{ $exporters | toJson }}
+        logs:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: {{ $exporters | toJson }}
+{{- end }}
