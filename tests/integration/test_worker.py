@@ -243,6 +243,22 @@ async def test_run_forever_drains_high_before_low(
     assert await redis_client.xlen(test_settings.stream_low) == 1
 
 
+async def test_worker_exits_zero_when_memory_threshold_breached(
+    test_settings, redis_client, pg_engine
+):
+    """A threshold of 1 MB is always exceeded by a real running process, so
+    the loop must notice on its first iteration, drain (no in-flight jobs),
+    and return 0 without any stop() ever being called."""
+    from app.worker.runner import run_forever
+
+    for stream in test_settings.ordered_streams:
+        await ensure_group(redis_client, stream, test_settings.consumer_group)
+    settings = test_settings.model_copy(update={"worker_max_rss_mb": 1})
+
+    exit_code = await asyncio.wait_for(run_forever(settings), timeout=30)
+    assert exit_code == 0
+
+
 async def test_jobs_run_concurrently(
     test_settings, pg_engine, redis_client, owner_id, monkeypatch
 ):

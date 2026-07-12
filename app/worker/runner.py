@@ -30,6 +30,7 @@ from app.retry import schedule_retry_or_fail
 from app.schemas.enums import JobType
 from app.schemas.payloads import validate_payload
 from app.worker.context import PgJobContext
+from app.worker.recycler import MemoryRecycler
 from app.worker.timeout import HandlerTimeout, run_with_timeout
 
 log = logging.getLogger("app.worker")
@@ -245,6 +246,7 @@ async def run_forever(
     client = create_redis_client(settings.redis_url)
 
     heartbeat = Heartbeat()
+    recycler = MemoryRecycler(settings.worker_max_rss_mb)
     health_server: HealthServer | None = None
     if settings.health_port is not None:
         # Bind failure raises out of run_forever: fail fast, compose restarts —
@@ -255,6 +257,7 @@ async def run_forever(
             max_heartbeat_age_s=worker_heartbeat_threshold_s(settings),
             engine=engine,
             redis_client=client,
+            draining=lambda: recycler.triggered,
         )
         await health_server.start()
 
@@ -296,7 +299,7 @@ async def run_forever(
             sem.release()
 
     async with asyncio.TaskGroup() as tg:
-        while not _should_stop():
+        while not _should_stop() and not recycler.should_recycle():
             heartbeat.beat()
             await sem.acquire()  # wait for a free slot before pulling work
             try:
