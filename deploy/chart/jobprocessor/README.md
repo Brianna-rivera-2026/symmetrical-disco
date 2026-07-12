@@ -1,9 +1,13 @@
 # jobprocessor Helm chart (OpenShift)
 
 ## Prerequisites (cluster administrators)
-Installed once per cluster via OperatorHub/OLM — this chart never manages operators:
+Run once per cluster, before any `helm install` of this chart — this chart never manages operators or cluster-wide infrastructure itself:
+
+    deploy/openshift/bootstrap-cluster.sh [otel-namespace]   # default namespace: observability
+
+Idempotent (safe to re-run). Installs, via OLM:
 - **Custom Metrics Autoscaler** (KEDA, `openshift-keda` namespace) — required only when `keda.enabled=true`. CRDs: `scaledobjects.keda.sh/v1alpha1`, `triggerauthentications.keda.sh/v1alpha1`.
-- **An existing OpenTelemetry collector** — required only when `otel.enabled=true`. This chart does not deploy a collector; it assumes the platform/observability team already runs one (however it's provisioned — e.g. via the Red Hat build of OpenTelemetry operator, or otherwise) and exports directly to it. Set `otel.exporterEndpoint` to that collector's OTLP/gRPC endpoint (e.g. `http://otel-collector.observability.svc.cluster.local:4317`); `helm template` fails fast if `otel.enabled=true` and `otel.exporterEndpoint` is empty. Because the collector isn't ours, the app-egress NetworkPolicy opens port 4317 to any destination rather than a specific pod selector.
+- **Red Hat build of OpenTelemetry** (operator, `openshift-operators` namespace) plus a shared `OpenTelemetryCollector` CR — required only when `otel.enabled=true`. This chart does not deploy its own collector; apps export OTLP directly to this cluster-wide one. The script prints the resulting endpoint (default: `http://otel-collector.observability.svc.cluster.local:4317`) — pass it as `otel.exporterEndpoint` when installing the chart. `helm template` fails fast if `otel.enabled=true` and `otel.exporterEndpoint` is empty. Because the collector isn't owned by this chart, the app-egress NetworkPolicy opens port 4317 to any destination rather than a specific pod selector. Set `OTEL_EXPORTER_ENDPOINT=<url>` before running the script to also forward the shared collector's output to an external backend, in addition to its debug exporter.
 
 ## Install
     deploy/openshift/init-secrets.sh <namespace> jobprocessor-api-user-keys alice bob
