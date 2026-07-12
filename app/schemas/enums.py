@@ -21,3 +21,9 @@ class JobPriority(str, Enum):
     high = "high"
     normal = "normal"
     low = "low"
+
+
+class ReportType(str, Enum):
+    sales = "sales"
+    ops = "ops"
+    weekly_summary = "weekly_summary"

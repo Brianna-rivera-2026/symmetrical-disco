@@ -1,26 +1,33 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.enums import JobPriority, JobStatus, JobType
 
 
 class JobSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     type: JobType
     payload: dict
     priority: JobPriority = JobPriority.normal
     scheduled_at: datetime | None = None
-    idempotency_key: str | None = None
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=255)
 
     @field_validator("scheduled_at")
     @classmethod
     def _normalize_utc(cls, v: datetime | None) -> datetime | None:
         if v is None:
             return None
-        if v.tzinfo is None:
-            return v.replace(tzinfo=timezone.utc)
-        return v.astimezone(timezone.utc)
+        v = (
+            v.replace(tzinfo=timezone.utc)
+            if v.tzinfo is None
+            else v.astimezone(timezone.utc)
+        )
+        if v > datetime.now(timezone.utc) + timedelta(days=365):
+            raise ValueError("scheduled_at more than 365 days in the future")
+        return v
 
 
 class JobAccepted(BaseModel):
