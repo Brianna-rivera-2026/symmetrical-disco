@@ -35,3 +35,6 @@ auth_validations = _meter.create_counter(
 jobs_dropped_ownerless = _meter.create_counter(
     "jobs.dropped_ownerless", description="Jobs dropped by the worker ownerless guard"
 )
+worker_recycles = _meter.create_counter(
+    "worker.recycles", description="Workers that self-recycled on memory breach"
+)
