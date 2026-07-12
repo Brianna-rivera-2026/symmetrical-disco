@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "jobprocessor.fullname" . }}-postgres
+  labels:
+    {{- include "jobprocessor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  serviceName: {{ include "jobprocessor.fullname" . }}-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "jobprocessor.labels" . | nindent 6 }}
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        {{- include "jobprocessor.labels" . | nindent 8 }}
+        app.kubernetes.io/component: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          env:
+            - name: POSTGRESQL_USER
+              value: {{ .Values.postgres.user | quote }}
+            - name: POSTGRESQL_DATABASE
+              value: {{ .Values.postgres.database | quote }}
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "jobprocessor.fullname" . }}-credentials
+                  key: db-password
+            - name: POSTGRESQL_MAX_CONNECTIONS
+              value: {{ .Values.postgres.maxConnections | quote }}
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["/usr/bin/pg_isready", "-U", {{ .Values.postgres.user | quote }}]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pgsql/data
+            - name: tls
+              mountPath: /opt/app-root/certs
+              readOnly: true
+            - name: tls-conf
+              mountPath: /opt/app-root/src/postgresql-cfg
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ include "jobprocessor.fullname" . }}-postgres-tls
+            # 0640 root-group: passes postgres's key-permission check while
+            # staying readable by the arbitrary-UID pod (GID 0 supplemental).
+            defaultMode: 0640
+        - name: tls-conf
+          configMap:
+            name: {{ include "jobprocessor.fullname" . }}-postgres-tls-conf
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage }}
