@@ -1,0 +1,41 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "jobprocessor.fullname" . }}-migrate
+  labels:
+    {{- include "jobprocessor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hook
+  annotations:
+    # post-install (NOT pre-install: pre-install hooks run before postgres
+    # exists on first install and would wait forever); pre-upgrade gates rollouts.
+    "helm.sh/hook": post-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        {{- include "jobprocessor.labels" . | nindent 8 }}
+        app.kubernetes.io/component: hook
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["alembic", "upgrade", "head"]
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "jobprocessor.fullname" . }}-credentials
+                  key: db-password
+            - name: DATABASE_URL
+              value: {{ include "jobprocessor.directDatabaseUrl" . | quote }}
+            - name: REDIS_URL   # Settings requires it even though alembic doesn't use Redis
+              value: rediss://unused:6379/0
+          volumeMounts:
+            {{- include "jobprocessor.caVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "jobprocessor.caVolume" . | nindent 8 }}
