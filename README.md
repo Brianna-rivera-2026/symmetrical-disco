@@ -199,51 +199,86 @@ curl "http://localhost:8000/jobs?type=email&status=completed&limit=20&cursor=eyJ
 - **Worker** (N replicas) — executes job handlers. Touches **Redis** (claims and acknowledges stream messages) and **PostgreSQL** (updates job status and results).
 - **Ticker** — background maintenance process. Touches **Redis** (promotes due delayed jobs into streams, reclaims stalled in-flight messages) and **PostgreSQL** (reconciles orphaned rows, marks jobs synced).
 
-## Persistence & Deployment
+## Deployment
 
-Postgres (`pgdata`) and Redis (`redisdata`) both use named Docker volumes, and
-Redis runs with AOF persistence (`appendfsync everysec`). Job history and
-queue state (streams, the consumer-group PEL, the delayed-jobs ZSET) survive
-`docker compose down` / `up --build` and container restarts. Only an explicit
-`docker compose down -v` destroys them.
+**`docker-compose.yml` is dev-only** — a quick local loop (build, run, poke at
+the API), not a deployment target. Postgres (`pgdata`) and Redis (`redisdata`)
+use named Docker volumes, so data survives `docker compose down` / `up
+--build` (only `down -v` destroys it), and `worker`/`api`/`ticker` drain
+in-flight work on SIGTERM before exiting. That's the extent of it — there's no
+TLS, no NetworkPolicy isolation, no autoscaling, and it isn't meant to grow
+those.
 
-**Redeploys drain gracefully.** `worker`, `api`, and `ticker` all trap SIGTERM
-and finish in-flight work before exiting; each service's `stop_grace_period`
-in `docker-compose.yml` is set above its worst-case drain time (the worker's
-50s covers the 45s handler timeout) so Docker's SIGKILL never arrives mid-job
-during a normal redeploy.
-
-**Rollback:** each buildable service shares an explicit `image:
-jobprocessor-app:${APP_TAG:-dev}` tag. Tag a release with
-`APP_TAG=v1.2.0 docker compose build`, deploy it with
-`APP_TAG=v1.2.0 docker compose up -d`, and roll back by re-running `up -d`
-with the previous `APP_TAG`. This is safe because migrations in this project
-are additive-only within a release (see `DECISIONS.md` §6) — an older image
-never breaks against a newer schema.
+**Production is the Helm chart** at
+[`deploy/chart/jobprocessor/`](deploy/chart/jobprocessor/) — TLS everywhere,
+default-deny NetworkPolicy isolation, an edge-TLS Route, PgBouncer + KEDA
+autoscaling with enforced connection math, and worker memory-threshold
+self-recycling, targeting OpenShift. See
+[`deploy/chart/jobprocessor/README.md`](deploy/chart/jobprocessor/README.md)
+for cluster prerequisites and install steps, and the section below for how
+authentication is configured there.
 
 **If Redis ever loses all its data** (e.g., the volume itself is deleted),
 recovery is a manual procedure — see
 [`docs/runbooks/redis-total-loss-recovery.md`](docs/runbooks/redis-total-loss-recovery.md).
 
-For the full system design, see the [Phase 1 design](docs/superpowers/specs/2026-06-30-job-processing-phase1-design.md); for the persistence, redeploy-drain, and migration-discipline hardening described above, see [the production-hardening design](docs/superpowers/specs/2026-07-01-production-hardening-design.md).
+For the full system design, see the [Phase 1 design](docs/superpowers/specs/2026-06-30-job-processing-phase1-design.md); for the persistence, redeploy-drain, and migration-discipline hardening described above, see [the production-hardening design](docs/superpowers/specs/2026-07-01-production-hardening-design.md); for the OpenShift deployment design, see [the OpenShift deployment design](docs/superpowers/specs/2026-07-11-openshift-deployment-design.md).
 
 ## Authentication
 
 All `/jobs*` routes require a per-user API key in the `X-API-Key` header
 (`/health`, `/ready`, and `/stats` stay open for probes). Jobs are scoped to
-the user that created them — other users' jobs return 404.
+the user that created them — other users' jobs return 404. Users are
+provisioned declaratively from a `{"name": "raw key", ...}` JSON file: the
+one-shot `users-sync` process hashes each key (SHA-256) and upserts it into
+Postgres before the API starts. Raw keys are never stored — only the hash
+reaches the database, and only usernames are logged.
 
-Users are provisioned declaratively: `secrets/api_user_keys.json` maps user
-names to raw keys, and the one-shot `users-sync` service upserts them (hashed,
-SHA-256) into Postgres before the API starts.
+### Local development
 
-Setup:
+1. `cp secrets/api_user_keys.example.json secrets/api_user_keys.json` and fill
+   in real users/keys (generate one with
+   `python -c "import secrets; print(secrets.token_urlsafe(32))"`).
+2. `docker compose up` — `users-sync` runs automatically after migrations.
 
-1. Generate a key per user: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
-2. `cp secrets/api_user_keys.example.json secrets/api_user_keys.json` and fill in real keys.
-3. `docker compose up` — the sync runs automatically after migrations.
+**Add or rotate a key:** edit `secrets/api_user_keys.json`, then
+`docker compose up users-sync` to re-sync (upsert-only: existing users not in
+the file are left untouched, never auto-deleted).
 
-Rotation: change the key in the secret file and restart (`docker compose up users-sync`).
-Revocation: remove the user's row from the `users` table (takes effect within
-`AUTH_CACHE_TTL_S`, default 60s), or rotate their key. Users removed from the
-secret file are NOT auto-deleted (upsert-only sync).
+### OpenShift (production)
+
+Keys live in a Kubernetes Secret (default name `jobprocessor-api-user-keys`,
+key `api_user_keys.json`), mounted by the chart's `users-sync` hook Job at
+install/upgrade — see `secrets.apiUserKeysSecret` in
+[`deploy/chart/jobprocessor/values.yaml`](deploy/chart/jobprocessor/values.yaml).
+
+**Initial setup**, before the first `helm install`:
+
+    deploy/openshift/init-secrets.sh <namespace> jobprocessor-api-user-keys alice bob
+
+Generates a key per user and creates the Secret; refuses to touch it if it
+already exists (prints the raw keys to stdout once — they aren't recoverable
+after that, only hashes reach the database).
+
+**Add or rotate a key on an already-running deployment** — the script above
+won't touch an existing Secret, so update it directly and re-run the sync:
+
+    # 1. Decode the existing keys, add/change entries, then re-create the Secret
+    #    (oc create --dry-run=client -o yaml | oc apply -f - updates in place):
+    oc get secret jobprocessor-api-user-keys -n <namespace> \
+      -o jsonpath='{.data.api_user_keys\.json}' | base64 -d > /tmp/keys.json
+    # edit /tmp/keys.json to add/change a user's key
+    oc create secret generic jobprocessor-api-user-keys -n <namespace> \
+      --from-file=api_user_keys.json=/tmp/keys.json \
+      --dry-run=client -o yaml | oc apply -f -
+    rm /tmp/keys.json
+
+    # 2. Re-run the users-sync hook Job so Postgres picks up the change.
+    #    The hook Job is deleted on success (hook-delete-policy), so re-trigger
+    #    it via helm upgrade rather than recreating the Job directly:
+    helm upgrade jp deploy/chart/jobprocessor -n <namespace> --reuse-values
+
+Revocation (either environment): remove the user's row from the `users`
+table (takes effect within `AUTH_CACHE_TTL_S`, default 60s), or rotate their
+key. Users removed from the secret file are NOT auto-deleted (upsert-only
+sync).
