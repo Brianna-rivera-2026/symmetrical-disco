@@ -1,10 +1,14 @@
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import AnyUrl, BaseModel, Field, TypeAdapter, UrlConstraints
 
 from app.schemas.enums import JobType
 
 MAX_BATCH_ITEMS = 500
+
+# https-only: worker egress allows TCP 443 exclusively, and plaintext
+# delivery would leak payloads in transit.
+HttpsUrl = Annotated[AnyUrl, UrlConstraints(allowed_schemes=["https"], max_length=2048)]
 
 
 class EmailPayload(BaseModel):
@@ -16,7 +20,7 @@ class EmailPayload(BaseModel):
 
 class WebhookPayload(BaseModel):
     type: Literal[JobType.webhook] = JobType.webhook
-    url: str = Field(max_length=2048)
+    url: HttpsUrl
     method: str = Field(default="POST", max_length=10)
 
 

@@ -47,7 +47,7 @@ async def test_batch_dispatches_real_handlers_mixed_success_and_failure(monkeypa
     assert "message_id" in out["results"][0]["result"]
     assert "file_url" in out["results"][1]["result"]
     assert out["errors"] == [
-        {"index": 1, "error": "webhook call to https://x.test failed"}
+        {"index": 1, "error": "webhook call to https://x.test/ failed"}
     ]
 
 

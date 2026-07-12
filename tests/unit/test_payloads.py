@@ -18,6 +18,16 @@ def test_validate_webhook_defaults_method():
     assert p.method == "POST"
 
 
+def test_validate_webhook_rejects_http_scheme():
+    with pytest.raises(ValidationError):
+        validate_payload("webhook", {"url": "http://x.test"})
+
+
+def test_validate_webhook_rejects_non_url():
+    with pytest.raises(ValidationError):
+        validate_payload("webhook", {"url": "not a url"})
+
+
 def test_validate_rejects_missing_required_field():
     with pytest.raises(ValidationError):
         validate_payload(JobType.email, {"subject": "no recipient"})

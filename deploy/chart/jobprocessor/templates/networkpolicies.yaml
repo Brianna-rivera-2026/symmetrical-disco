@@ -89,6 +89,36 @@ spec:
         - { protocol: TCP, port: 4317 }
     {{- end }}
 ---
+{{- if .Values.worker.internetEgress.enabled }}
+# ---------- worker -> public internet (webhook delivery) ----------
+# ipBlock allows 0.0.0.0/0 minus private/cluster/metadata ranges, so a
+# compromised or SSRF-driven webhook job cannot reach cluster-internal
+# services even if the application-level host allowlist is misconfigured.
+# Default OpenShift pod (10.128.0.0/14) and service (172.30.0.0/16) CIDRs
+# fall inside the RFC1918 exceptions.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "jobprocessor.fullname" . }}-worker-internet-egress
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: worker
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range .Values.worker.internetEgress.deniedCidrs }}
+              - {{ . }}
+              {{- end }}
+      ports:
+        - { protocol: TCP, port: 443 }
+---
+{{- end }}
 # ---------- pgbouncer: in from apps, out to postgres ----------
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

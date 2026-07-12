@@ -18,6 +18,15 @@ validation with domain allowlists, and least-privilege Postgres roles.
 - **Identifier:** custom callable keyed by the authenticated user resolved from
   the API key header; falls back to client IP when no valid key is present.
   All API replicas share counters via Redis.
+- **Client IP behind proxies:** the IP fallback is meaningless without
+  forwarded-header handling — behind the OpenShift router the socket peer is
+  always a router pod, so all unauthenticated clients would share one bucket.
+  Add uvicorn's `ProxyHeadersMiddleware` in `create_app`, with the trusted
+  proxy list driven by a new `forwarded_allow_ips: str = "127.0.0.1"` setting
+  (passed through to the middleware). Helm sets it to `"*"`, which is safe
+  there because the `api-ingress` NetworkPolicy only admits traffic from the
+  router namespace on :8000; docker-compose keeps the localhost default since
+  clients connect directly and `X-Forwarded-For` would be spoofable.
 - **Limits** (route dependencies, settings-driven):
 
   | Route group | Default limit |
@@ -35,8 +44,9 @@ validation with domain allowlists, and least-privilege Postgres roles.
 
 ## 2. Webhook payload tightening + egress allowlist
 
-- `WebhookPayload.url` becomes `HttpUrl` restricted to `http`/`https` schemes,
-  keeping `max_length=2048`.
+- `WebhookPayload.url` becomes `HttpUrl` restricted to the `https` scheme
+  (matches the 443-only worker egress policy; plaintext webhook delivery
+  would leak payloads in transit), keeping `max_length=2048`.
 - `WebhookPayload.method` becomes `Literal["GET", "POST"]` (default `"POST"`).
 - New setting `webhook_allowed_hosts: list[str]` — host **suffix** match, so
   `hooks.example.com` also matches `a.hooks.example.com`. **Empty list = deny
@@ -49,6 +59,18 @@ validation with domain allowlists, and least-privilege Postgres roles.
   2. **Worker:** `handle_webhook` re-checks the host before "sending". A
      non-allowlisted host raises a **non-retryable** error so jobs enqueued
      before the list was tightened (or injected via DB) cannot bypass it.
+- **Network-level containment:** the chart ships a worker egress
+  NetworkPolicy (`worker-internet-egress`, toggled by
+  `worker.internetEgress.enabled`, default on) allowing TCP 443 only to
+  `ipBlock cidr: 0.0.0.0/0` with `except` for RFC1918 ranges (`10.0.0.0/8`,
+  `172.16.0.0/12`, `192.168.0.0/16`) and link-local/metadata
+  (`169.254.0.0/16`), so a compromised or SSRF-driven webhook job cannot
+  reach cluster-internal services even if the host allowlist is
+  misconfigured. Default OpenShift pod/service CIDRs fall inside the RFC1918
+  exceptions; clusters with non-RFC1918 CIDRs extend
+  `worker.internetEgress.deniedCidrs`. Decision 2026-07-13: shipped ahead of
+  real webhook HTTP (handler still simulated) so the production posture is
+  already in place when it lands.
 
 ## 3. Request size limits
 
@@ -65,6 +87,9 @@ validation with domain allowlists, and least-privilege Postgres roles.
 ## 4. Stricter pydantic types + email domain allowlist
 
 - `EmailPayload.to` becomes `EmailStr` (adds the `email-validator` dependency).
+  Note: pydantic hardcodes `check_deliverability=False`, so `EmailStr` is
+  syntax-only — no DNS lookups happen at validation time and none need
+  disabling.
 - New setting `email_allowed_domains: list[str]` checked during payload
   validation. **Empty list = deny all email jobs**, matching the webhook
   default. Matching is on the exact domain part of the address,
@@ -99,6 +124,21 @@ validation with domain allowlists, and least-privilege Postgres roles.
     SELECT, INSERT, UPDATE, DELETE ON TABLES TO jobs_app` (and sequence
     equivalent) so tables created by future migrations are granted
     automatically.
+  - The script is written to be **safe to re-run**: role creation guarded with
+    `DO $$ ... IF NOT EXISTS` blocks, plus explicit
+    `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO
+    jobs_app` and `GRANT USAGE ON ALL SEQUENCES ...` alongside the default
+    privileges. On a fresh database these grant over zero tables (roles are
+    created before Alembic runs) — they exist for the re-run path below.
+- **Existing databases:** `docker-entrypoint-initdb.d` only executes on a
+  fresh data directory, so the init script alone cannot migrate a live
+  deployment. For existing volumes the script must be applied manually (or
+  via a one-off Helm hook Job), preceded by
+  `REASSIGN OWNED BY jobs TO jobs_migrator` (pre-existing tables are owned by
+  the old `jobs` role, and `ALTER DEFAULT PRIVILEGES FOR ROLE jobs_migrator`
+  only covers objects that role creates in the future). The explicit
+  `GRANT ... ON ALL TABLES` statements above are what make this re-run pick up
+  the pre-existing tables.
 - **Wiring:**
   - Helm: `migrate-job.yaml` gets the migrator DSN; `api`, `worker`, `ticker`
     deployments and `users-sync-job` (DML only) get the app DSN. Both DSNs and
