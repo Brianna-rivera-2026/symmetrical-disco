@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import ValidationError
 
+from app.api.middleware import BodySizeLimitMiddleware
 from app.api.routes import router
 from app.core.config import Settings, get_settings
 from app.core.db import make_engine, make_session_factory
@@ -37,6 +38,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         shutdown_telemetry()
 
     app = FastAPI(title="Job Processor", lifespan=lifespan)
+    app.add_middleware(
+        BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes
+    )
     app.state.settings = settings
     app.state.session_factory = session_factory
     app.state.redis = redis_client
