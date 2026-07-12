@@ -1,8 +1,14 @@
 import pytest
 from pydantic import ValidationError
 
+from app.core.config import Settings
 from app.schemas.enums import JobType
-from app.schemas.payloads import EmailPayload, WebhookPayload, validate_payload
+from app.schemas.payloads import (
+    EmailPayload,
+    PayloadPolicyError,
+    WebhookPayload,
+    validate_payload,
+)
 
 
 def test_validate_email_payload():
@@ -76,3 +82,70 @@ def test_payload_rejects_unknown_keys():
         validate_payload(
             JobType.email, {"to": "a@b.com", "subject": "Hi", "bcc": "spy@evil.test"}
         )
+
+
+def _settings(**overrides):
+    return Settings(
+        database_url="postgresql+psycopg://u:p@h/db",
+        redis_url="redis://h:6379/0",
+        **overrides,
+    )
+
+
+def test_webhook_host_suffix_match_allowed():
+    s = _settings(webhook_allowed_hosts=["hooks.example.com"])
+    p = validate_payload("webhook", {"url": "https://a.hooks.example.com/x"}, s)
+    assert isinstance(p, WebhookPayload)
+
+
+def test_webhook_host_not_allowlisted_rejected():
+    s = _settings(webhook_allowed_hosts=["hooks.example.com"])
+    with pytest.raises(PayloadPolicyError):
+        validate_payload("webhook", {"url": "https://evil.test/x"}, s)
+
+
+def test_webhook_empty_allowlist_denies_all():
+    with pytest.raises(PayloadPolicyError):
+        validate_payload("webhook", {"url": "https://x.test"}, _settings())
+
+
+def test_webhook_suffix_match_requires_label_boundary():
+    s = _settings(webhook_allowed_hosts=["hooks.example.com"])
+    with pytest.raises(PayloadPolicyError):
+        validate_payload(
+            "webhook", {"url": "https://evilhooks.example.com.attacker.test"}, s
+        )
+    with pytest.raises(PayloadPolicyError):
+        validate_payload("webhook", {"url": "https://xhooks.example.com"}, s)
+
+
+def test_email_domain_allowed_case_insensitive():
+    s = _settings(email_allowed_domains=["Example.COM"])
+    p = validate_payload(JobType.email, {"to": "a@example.com", "subject": "Hi"}, s)
+    assert isinstance(p, EmailPayload)
+
+
+def test_email_domain_not_allowlisted_rejected():
+    s = _settings(email_allowed_domains=["example.com"])
+    with pytest.raises(PayloadPolicyError):
+        validate_payload(JobType.email, {"to": "a@other.com", "subject": "Hi"}, s)
+
+
+def test_batch_items_are_policy_checked():
+    s = _settings(email_allowed_domains=["example.com"], webhook_allowed_hosts=[])
+    with pytest.raises(PayloadPolicyError):
+        validate_payload(
+            "batch",
+            {
+                "items": [
+                    {"type": "email", "to": "a@example.com", "subject": "ok"},
+                    {"type": "webhook", "url": "https://x.test"},
+                ]
+            },
+            s,
+        )
+
+
+def test_no_settings_skips_policy():
+    p = validate_payload("webhook", {"url": "https://x.test"})
+    assert isinstance(p, WebhookPayload)

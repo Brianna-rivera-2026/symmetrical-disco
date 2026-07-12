@@ -285,7 +285,7 @@ async def test_jobs_run_concurrently(
             await repo.create_job(
                 session,
                 JobType.email,
-                {"to": "a@b.c", "subject": "s", "body": "b"},
+                {"to": "a@b.com", "subject": "s", "body": "b"},
                 user_id=owner_id,
             )
             for _ in range(2)
@@ -469,3 +469,21 @@ async def test_owned_job_still_processes(
     )
     outcome = await process_job(db_session, redis_client, test_settings, job.id)
     assert outcome.label == "completed"
+
+
+async def test_policy_violation_fails_without_retry(
+    db_session, redis_client, test_settings, owner_id
+):
+    job = await repo.create_job(
+        db_session,
+        JobType.webhook,
+        {"url": "https://evil.test/x"},  # not in test_settings.webhook_allowed_hosts
+        user_id=owner_id,
+    )
+    outcome = await process_job(db_session, redis_client, test_settings, job.id)
+    assert outcome.label == "policy_rejected"
+    assert outcome.ack is True
+    await db_session.refresh(job)
+    assert job.status is JobStatus.failed
+    assert job.attempts == 1  # fail_job increments once; no retry ladder beyond it
+    assert job.error["type"] == "PayloadPolicyError"

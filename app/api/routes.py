@@ -149,7 +149,7 @@ async def submit_job(
 ) -> JobAccepted:
     settings = request.app.state.settings
     try:
-        validate_payload(submission.type, submission.payload)
+        validate_payload(submission.type, submission.payload, settings)
     except (ValidationError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

@@ -103,7 +103,13 @@ def sync_session_factory(database_url):
 @pytest.fixture(scope="session")
 def test_settings(database_url, redis_container) -> Settings:
     redis_url = f"redis://{redis_container.get_container_host_ip()}:{redis_container.get_exposed_port(6379)}/0"
-    return Settings(database_url=database_url, redis_url=redis_url)
+    return Settings(
+        database_url=database_url,
+        redis_url=redis_url,
+        rate_limit_enabled=False,  # rate-limit tests opt in explicitly
+        webhook_allowed_hosts=["x.test"],
+        email_allowed_domains=["b.com"],
+    )
 
 
 @pytest.fixture

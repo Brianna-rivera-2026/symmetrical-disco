@@ -25,7 +25,7 @@ def test_same_key_different_payload_returns_409(client):
         "/jobs",
         json={
             "type": "email",
-            "payload": {"to": "z@z.com", "subject": "Diff"},
+            "payload": {"to": "z@b.com", "subject": "Diff"},
             "idempotency_key": "k2",
         },
     )
@@ -64,7 +64,7 @@ async def test_race_path_different_payload_conflicts(
         "/jobs",
         json={
             "type": "email",
-            "payload": {"to": "z@z.com", "subject": "Diff"},
+            "payload": {"to": "z@b.com", "subject": "Diff"},
             "idempotency_key": "race",
         },
     )

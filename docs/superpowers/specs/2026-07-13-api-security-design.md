@@ -56,9 +56,10 @@ validation with domain allowlists, and least-privilege Postgres roles.
   1. **Submission:** the allowlist check runs during payload validation on
      `POST /jobs`; a non-allowlisted host is rejected with 422 and a clear
      message.
-  2. **Worker:** `handle_webhook` re-checks the host before "sending". A
-     non-allowlisted host raises a **non-retryable** error so jobs enqueued
-     before the list was tightened (or injected via DB) cannot bypass it.
+  2. **Worker:** the runner's `validate_payload(job.type, job.payload, settings)`
+     call re-checks policy on every execution attempt, so jobs enqueued before
+     the list was tightened (or injected via DB) fail **non-retryably**
+     (`PayloadPolicyError`) — enforcement lives in one place instead of per-handler.
 - **Network-level containment:** the chart ships a worker egress
   NetworkPolicy (`worker-internet-egress`, toggled by
   `worker.internetEgress.enabled`, default on) allowing TCP 443 only to

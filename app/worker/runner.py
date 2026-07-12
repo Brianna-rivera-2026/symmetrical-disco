@@ -28,7 +28,7 @@ from app.jobs.registry import run_handler
 from app.queue.consumer import CONSUMER_NAME, ack, ensure_group, read_priority
 from app.retry import schedule_retry_or_fail
 from app.schemas.enums import JobType
-from app.schemas.payloads import validate_payload
+from app.schemas.payloads import PayloadPolicyError, validate_payload
 from app.worker.context import PgJobContext
 from app.worker.recycler import MemoryRecycler
 from app.worker.timeout import HandlerTimeout, run_with_timeout
@@ -108,7 +108,7 @@ async def process_job(
         await repo.init_progress(session, job.id)
     ctx = PgJobContext(job.id, session_factory, settings.cancel_poll_interval_s)
     try:
-        payload = validate_payload(job.type, job.payload)
+        payload = validate_payload(job.type, job.payload, settings)
         result = await run_with_timeout(
             run_handler(job.type, payload, ctx), settings.job_handler_timeout_s
         )
@@ -161,6 +161,20 @@ async def process_job(
         # capture is needed here.
         await session.rollback()
         raise
+    except PayloadPolicyError as exc:
+        # Non-retryable: retrying can never make a policy violation pass.
+        span.record_exception(exc)
+        span.set_status(Status(StatusCode.ERROR, "PayloadPolicyError"))
+        won = await repo.fail_job(
+            session, job.id, {"type": "PayloadPolicyError", "message": str(exc)}
+        )
+        if won:
+            app_metrics.jobs_failed.add(
+                1, {"type": job.type.value, "priority": job.priority.value}
+            )
+        log.warning("job.policy_rejected", extra={"won": won})
+        _record_outcome(job, "policy_rejected", started)
+        return Outcome(ack=won, label="policy_rejected")
     except Exception as exc:  # noqa: BLE001 — any handler/validation error is retryable
         span.record_exception(exc)
         span.set_status(Status(StatusCode.ERROR, type(exc).__name__))

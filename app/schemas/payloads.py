@@ -82,8 +82,41 @@ JobPayload = Annotated[
 _ADAPTER: TypeAdapter = TypeAdapter(JobPayload)
 
 
+class PayloadPolicyError(ValueError):
+    """Payload passed schema validation but violates a configured allowlist.
+
+    Subclasses ValueError so the API's existing 422 path catches it; the
+    worker treats it as non-retryable."""
+
+
+def _host_allowed(host: str, allowed: list[str]) -> bool:
+    host = host.lower().rstrip(".")
+    for entry in allowed:
+        entry = entry.lower().strip(".")
+        if host == entry or host.endswith("." + entry):
+            return True
+    return False
+
+
+def _check_policy(payload, settings) -> None:
+    if isinstance(payload, WebhookPayload):
+        host = payload.url.host or ""
+        if not _host_allowed(host, settings.webhook_allowed_hosts):
+            raise PayloadPolicyError(f"webhook host {host!r} is not allowlisted")
+    elif isinstance(payload, EmailPayload):
+        domain = payload.to.rsplit("@", 1)[1].lower()
+        if domain not in {d.lower() for d in settings.email_allowed_domains}:
+            raise PayloadPolicyError(f"email domain {domain!r} is not allowlisted")
+    elif isinstance(payload, BatchPayload):
+        for item in payload.items:
+            _check_policy(item, settings)
+
+
 def validate_payload(
-    job_type: JobType | str, raw: dict
+    job_type: JobType | str, raw: dict, settings=None
 ) -> EmailPayload | WebhookPayload | ReportPayload | BatchPayload:
     job_type = JobType(job_type)  # raises ValueError on unknown type
-    return _ADAPTER.validate_python({**raw, "type": job_type.value})
+    payload = _ADAPTER.validate_python({**raw, "type": job_type.value})
+    if settings is not None:
+        _check_policy(payload, settings)
+    return payload
