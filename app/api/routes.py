@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import repository as repo
 from app.api.deps import get_current_user, get_db, get_redis
+from app.api.ratelimit import rate_limit
 from app.core import metrics as app_metrics
 from app.core.telemetry import current_trace_carrier
 from app.idempotency import canonical_hash
@@ -56,7 +57,11 @@ async def ready(
     return HealthResponse(status="ok", checks=HealthChecks(**checks))
 
 
-@router.get("/stats", response_model=StatsResponse)
+@router.get(
+    "/stats",
+    response_model=StatsResponse,
+    dependencies=[Depends(rate_limit("stats"))],
+)
 async def stats(
     request: Request,
     session: AsyncSession = Depends(get_db),
@@ -138,7 +143,12 @@ async def _replay_or_conflict(existing, req_hash, response) -> JobAccepted:
     )
 
 
-@router.post("/jobs", response_model=JobAccepted, status_code=202)
+@router.post(
+    "/jobs",
+    response_model=JobAccepted,
+    status_code=202,
+    dependencies=[Depends(rate_limit("submit"))],
+)
 async def submit_job(
     submission: JobSubmission,
     request: Request,
@@ -175,7 +185,11 @@ async def submit_job(
     return _accepted(job)
 
 
-@router.get("/jobs/{job_id}", response_model=JobOut)
+@router.get(
+    "/jobs/{job_id}",
+    response_model=JobOut,
+    dependencies=[Depends(rate_limit("read"))],
+)
 async def get_job(
     job_id: UUID,
     session: AsyncSession = Depends(get_db),
@@ -187,7 +201,11 @@ async def get_job(
     return JobOut.model_validate(job)
 
 
-@router.post("/jobs/{job_id}/retry", response_model=JobOut)
+@router.post(
+    "/jobs/{job_id}/retry",
+    response_model=JobOut,
+    dependencies=[Depends(rate_limit("control"))],
+)
 async def retry_job(
     job_id: UUID,
     request: Request,
@@ -209,7 +227,11 @@ async def retry_job(
     return JobOut.model_validate(job)
 
 
-@router.post("/jobs/{job_id}/cancel", response_model=JobOut)
+@router.post(
+    "/jobs/{job_id}/cancel",
+    response_model=JobOut,
+    dependencies=[Depends(rate_limit("control"))],
+)
 async def cancel_job_route(
     job_id: UUID,
     request: Request,
@@ -243,7 +265,11 @@ async def cancel_job_route(
     raise HTTPException(status_code=409, detail="job state is changing; retry")
 
 
-@router.get("/jobs", response_model=JobList)
+@router.get(
+    "/jobs",
+    response_model=JobList,
+    dependencies=[Depends(rate_limit("read"))],
+)
 async def list_jobs(
     session: AsyncSession = Depends(get_db),
     status: JobStatus | None = Query(default=None),

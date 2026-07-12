@@ -1,10 +1,13 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi_limiter import FastAPILimiter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import ValidationError
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.api.middleware import BodySizeLimitMiddleware
+from app.api.ratelimit import user_or_ip_identifier
 from app.api.routes import router
 from app.core.config import Settings, get_settings
 from app.core.db import make_engine, make_session_factory
@@ -32,6 +35,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         for stream in settings.ordered_streams:
             await ensure_group(redis_client, stream, settings.consumer_group)
+        if settings.rate_limit_enabled:
+            await FastAPILimiter.init(redis_client, identifier=user_or_ip_identifier)
         yield
         await redis_client.aclose()
         await engine.dispose()
@@ -40,6 +45,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Job Processor", lifespan=lifespan)
     app.add_middleware(
         BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes
+    )
+    app.add_middleware(
+        ProxyHeadersMiddleware, trusted_hosts=settings.forwarded_allow_ips
     )
     app.state.settings = settings
     app.state.session_factory = session_factory
