@@ -70,7 +70,9 @@ validation with domain allowlists, and least-privilege Postgres roles.
   default. Matching is on the exact domain part of the address,
   case-insensitive. docker-compose dev sets a permissive value inline.
 - `EmailPayload.subject`: add `min_length=1`.
-- `ReportPayload.report_type`: `pattern=r"^[a-z0-9_-]+$"`.
+- `ReportPayload.report_type` becomes a closed enum: new `ReportType(str, Enum)`
+  in `app/schemas/enums.py` with the values already used by the codebase —
+  `sales`, `ops`, `weekly_summary`. Unknown report types are rejected with 422.
 - `ReportPayload.params`: keep the 50-key intent but enforce it with a real
   validator (pydantic `max_length` on `dict` is a no-op), plus a serialized
   size cap of 8 KB.
