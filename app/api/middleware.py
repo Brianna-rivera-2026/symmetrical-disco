@@ -3,10 +3,6 @@
 import json
 
 
-class _BodyTooLarge(Exception):
-    pass
-
-
 async def _send_413(send) -> None:
     body = json.dumps({"detail": "request body too large"}).encode()
     await send(
@@ -42,29 +38,35 @@ class BodySizeLimitMiddleware:
                         await _send_413(send)
                         return
                 except ValueError:
-                    pass  # malformed header: fall through to counting
+                    pass  # malformed header: fall through to buffering
 
-        received = 0
-        response_started = False
-
-        async def wrapped_send(message) -> None:
-            nonlocal response_started
-            if message["type"] == "http.response.start":
-                response_started = True
-            await send(message)
-
-        async def wrapped_receive():
-            nonlocal received
+        # Buffer the body ourselves (bounded to max_bytes + 1) so we can
+        # reject BEFORE the inner app (FastAPI) ever starts reading it --
+        # FastAPI's own body-parsing catches arbitrary exceptions raised
+        # from receive() and converts them into its own 400 response, so
+        # raising mid-stream from a wrapped receive() never reaches this
+        # middleware's exception handling.
+        buffered = []
+        total = 0
+        while True:
             message = await receive()
-            if message["type"] == "http.request":
-                received += len(message.get("body", b""))
-                if received > self.max_bytes:
-                    raise _BodyTooLarge
-            return message
+            if message["type"] != "http.request":
+                buffered.append(message)  # e.g. http.disconnect
+                break
+            body = message.get("body", b"")
+            total += len(body)
+            if total > self.max_bytes:
+                await _send_413(send)
+                return
+            buffered.append(message)
+            if not message.get("more_body", False):
+                break
 
-        try:
-            await self.app(scope, wrapped_receive, wrapped_send)
-        except _BodyTooLarge:
-            if response_started:
-                raise  # too late for a clean 413; let the server drop the connection
-            await _send_413(send)
+        queue = list(buffered)
+
+        async def replay_receive():
+            if queue:
+                return queue.pop(0)
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
