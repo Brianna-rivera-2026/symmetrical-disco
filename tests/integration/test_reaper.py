@@ -20,9 +20,7 @@ async def test_reaper_requeues_abandoned_processing_job(
     job = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}
     )
-    await _plant_pel(
-        redis_client, settings.consumer_group, settings.stream_normal, job.id
-    )
+    await _plant_pel(redis_client, settings.consumer_group, settings.stream_normal, job.id)
     await repo.claim_job(db_session, job.id)  # → processing (worker "died")
 
     handled = await reap_stale(db_session, redis_client, settings)
@@ -47,9 +45,7 @@ async def test_reaper_finishes_handoff_for_unsynced_pending(
     job = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}
     )
-    await _plant_pel(
-        redis_client, settings.consumer_group, settings.stream_normal, job.id
-    )
+    await _plant_pel(redis_client, settings.consumer_group, settings.stream_normal, job.id)
 
     handled = await reap_stale(db_session, redis_client, settings)
 
@@ -58,14 +54,10 @@ async def test_reaper_finishes_handoff_for_unsynced_pending(
     assert job.status is JobStatus.pending
     assert job.attempts == 0  # handoff finished, NOT a new retry
     assert job.is_synced_to_redis is True
-    assert (
-        await redis_client.xlen(settings.stream_normal) == 2
-    )  # planted + reaper's re-add
+    assert await redis_client.xlen(settings.stream_normal) == 2  # planted + reaper's re-add
 
 
-async def test_reaper_only_acks_completed_ghost(
-    db_session, redis_client, test_settings
-):
+async def test_reaper_only_acks_completed_ghost(db_session, redis_client, test_settings):
     settings = test_settings.model_copy(update={"visibility_timeout_s": 0})
     job = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}
@@ -73,9 +65,7 @@ async def test_reaper_only_acks_completed_ghost(
     await repo.claim_job(db_session, job.id)
     await repo.complete_job(db_session, job.id, {"message_id": "m1"})  # terminal
     await repo.mark_synced(db_session, job.id)
-    await _plant_pel(
-        redis_client, settings.consumer_group, settings.stream_normal, job.id
-    )
+    await _plant_pel(redis_client, settings.consumer_group, settings.stream_normal, job.id)
 
     handled = await reap_stale(db_session, redis_client, settings)
 
@@ -99,9 +89,7 @@ async def test_reaper_treats_cancelled_unsynced_as_ghost_no_resurrection(
     job = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}
     )
-    await _plant_pel(
-        redis_client, settings.consumer_group, settings.stream_normal, job.id
-    )
+    await _plant_pel(redis_client, settings.consumer_group, settings.stream_normal, job.id)
     assert await repo.cancel_pending_or_scheduled(db_session, job.id) is True
 
     handled = await reap_stale(db_session, redis_client, settings)
