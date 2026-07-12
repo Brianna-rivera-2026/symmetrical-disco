@@ -1,0 +1,51 @@
+image:
+  repository: jobprocessor-app
+  tag: dev
+  pullPolicy: IfNotPresent
+
+api:
+  replicas: 2
+  dbPoolSize: 5
+
+worker:
+  replicas: 2          # used when keda.enabled=false
+  dbPoolSize: 5
+  concurrency: 10
+  maxRssMb: 512
+
+ticker:
+  dbPoolSize: 2
+
+keda:
+  enabled: false
+  maxReplicas: 6
+  lagCount: 10         # target backlog per replica, per stream
+  unsafeSsl: true      # KEDA cannot mount the service-CA ConfigMap; server-auth skipped for the scaler only
+
+otel:
+  enabled: false
+  exporterEndpoint: "" # non-empty => collector forwards OTLP there; empty => debug exporter only
+
+postgres:
+  image: quay.io/sclorg/postgresql-16-c9s:latest
+  maxConnections: 100
+  reservedConnections: 5
+  database: jobs
+  user: jobs
+  storage: 1Gi
+
+pgbouncer:
+  image: edoburu/pgbouncer:v1.23.1-p2
+  defaultPoolSize: 20
+  maxClientConn: 60
+
+redis:
+  image: redis:7
+  storage: 1Gi
+
+tls:
+  appToPgbouncer: true
+
+secrets:
+  # created out-of-band by deploy/openshift/init-secrets.sh; key: api_user_keys.json
+  apiUserKeysSecret: jobprocessor-api-user-keys
