@@ -79,6 +79,29 @@ async def test_ready_503_when_redis_down(pg_engine):
         await server.stop()
 
 
+async def test_ready_returns_503_while_draining(pg_engine, redis_client):
+    server = HealthServer(
+        port=0,
+        heartbeat=Heartbeat(),
+        max_heartbeat_age_s=30.0,
+        engine=pg_engine,
+        redis_client=redis_client,
+        draining=lambda: True,
+    )
+    await server.start()
+    try:
+        response = await _get(server, "/ready")
+        assert response.status_code == 503
+        assert response.json() == {
+            "status": "draining",
+            "checks": {"draining": "true"},
+        }
+        health = await _get(server, "/health")
+        assert health.status_code == 200  # draining is not dead
+    finally:
+        await server.stop()
+
+
 async def test_unknown_path_404(health_server):
     server, _ = health_server
     assert (await _get(server, "/nope")).status_code == 404

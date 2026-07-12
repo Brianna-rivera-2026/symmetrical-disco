@@ -3,6 +3,7 @@ import contextlib
 import socket
 import sys
 import time
+from collections.abc import Callable
 
 import redis.asyncio as redis
 import uvicorn
@@ -56,11 +57,14 @@ class HealthServer:
         max_heartbeat_age_s: float,
         engine: AsyncEngine,
         redis_client: redis.Redis,
+        *,
+        draining: Callable[[], bool] | None = None,
     ) -> None:
         self._heartbeat = heartbeat
         self._max_age = max_heartbeat_age_s
         self._engine = engine
         self._redis = redis_client
+        self._draining = draining
         self._task: asyncio.Task | None = None
 
         app = FastAPI()
@@ -80,6 +84,11 @@ class HealthServer:
 
         @app.get("/ready")
         async def ready() -> JSONResponse:
+            if self._draining is not None and self._draining():
+                return JSONResponse(
+                    {"status": "draining", "checks": {"draining": "true"}},
+                    status_code=503,
+                )
             checks: dict[str, str] = {}
             try:
                 async with self._engine.connect() as conn:
