@@ -39,6 +39,15 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str = "http://localhost:4317"
     health_port: int | None = None
     api_user_keys_file: str = "/run/secrets/api_user_keys"
+    rate_limit_enabled: bool = True
+    submit_rate_limit_per_min: int = 20
+    control_rate_limit_per_min: int = 30
+    read_rate_limit_per_min: int = 120
+    stats_rate_limit_per_min: int = 30
+    forwarded_allow_ips: str = "127.0.0.1"
+    webhook_allowed_hosts: list[str] = []
+    email_allowed_domains: list[str] = []
+    max_request_body_bytes: int = 262144
 
     @model_validator(mode="after")
     def _check_timeout_invariant(self) -> "Settings":

@@ -114,3 +114,18 @@ def test_new_deployment_settings_defaults():
     assert settings.db_pool_size == 5
     assert settings.db_disable_prepared_statements is False
     assert settings.worker_max_rss_mb is None
+
+
+def test_security_settings_defaults():
+    s = Settings(
+        database_url="postgresql+psycopg://u:p@h/db", redis_url="redis://h:6379/0"
+    )
+    assert s.rate_limit_enabled is True
+    assert s.submit_rate_limit_per_min == 20
+    assert s.control_rate_limit_per_min == 30
+    assert s.read_rate_limit_per_min == 120
+    assert s.stats_rate_limit_per_min == 30
+    assert s.forwarded_allow_ips == "127.0.0.1"
+    assert s.webhook_allowed_hosts == []
+    assert s.email_allowed_domains == []
+    assert s.max_request_body_bytes == 262144
