@@ -147,7 +147,7 @@ async def _replay_or_conflict(existing, req_hash, response) -> JobAccepted:
     "/jobs",
     response_model=JobAccepted,
     status_code=202,
-    dependencies=[Depends(rate_limit("submit"))],
+    dependencies=[Depends(get_current_user), Depends(rate_limit("submit"))],
 )
 async def submit_job(
     submission: JobSubmission,
@@ -188,7 +188,7 @@ async def submit_job(
 @router.get(
     "/jobs/{job_id}",
     response_model=JobOut,
-    dependencies=[Depends(rate_limit("read"))],
+    dependencies=[Depends(get_current_user), Depends(rate_limit("read"))],
 )
 async def get_job(
     job_id: UUID,
@@ -204,7 +204,7 @@ async def get_job(
 @router.post(
     "/jobs/{job_id}/retry",
     response_model=JobOut,
-    dependencies=[Depends(rate_limit("control"))],
+    dependencies=[Depends(get_current_user), Depends(rate_limit("control"))],
 )
 async def retry_job(
     job_id: UUID,
@@ -230,7 +230,7 @@ async def retry_job(
 @router.post(
     "/jobs/{job_id}/cancel",
     response_model=JobOut,
-    dependencies=[Depends(rate_limit("control"))],
+    dependencies=[Depends(get_current_user), Depends(rate_limit("control"))],
 )
 async def cancel_job_route(
     job_id: UUID,
@@ -268,7 +268,7 @@ async def cancel_job_route(
 @router.get(
     "/jobs",
     response_model=JobList,
-    dependencies=[Depends(rate_limit("read"))],
+    dependencies=[Depends(get_current_user), Depends(rate_limit("read"))],
 )
 async def list_jobs(
     session: AsyncSession = Depends(get_db),

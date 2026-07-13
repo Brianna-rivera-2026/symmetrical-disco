@@ -28,7 +28,10 @@ spec:
             - name: DB_POOL_SIZE
               value: {{ .Values.api.dbPoolSize | quote }}
             - name: FORWARDED_ALLOW_IPS
-              value: "*"   # safe: api-ingress netpol only admits the router on :8000
+              value: "*"   # trusts XFF from any peer the netpol admits (the router); this
+                           # authenticates the immediate connection, not the XFF chain
+                           # contents -- IP-based rate-limit fallback (unauthenticated
+                           # /stats only) is best-effort, not a hard guarantee
           ports:
             - containerPort: 8000
           readinessProbe:

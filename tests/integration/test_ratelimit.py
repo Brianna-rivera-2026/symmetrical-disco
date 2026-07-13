@@ -1,3 +1,5 @@
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -104,3 +106,20 @@ def test_groups_have_independent_counters(cross_group_client):
     # unaffected by the exhausted "stats" bucket.
     r = cross_group_client.get("/jobs", headers=headers)
     assert r.status_code == 200
+
+
+def test_garbage_api_keys_never_consume_a_rate_limit_bucket(limited_client):
+    """Regression guard for the auth-before-rate-limit ordering fix: an
+    attacker rotating a fresh, never-valid X-API-Key on every request must
+    always 401 from get_current_user (declared before rate_limit(...) in the
+    route's dependencies=[...]) and never reach the rate limiter's Redis
+    interaction — so no garbage key ever consumes, or is throttled by, a
+    submit-group bucket. Every one of these must 401; none may be a 202
+    (would mean auth was bypassed) or a 429 (would mean a real bucket was
+    consumed by an invalid key)."""
+    for _ in range(25):
+        headers = {"X-API-Key": f"garbage-{uuid.uuid4()}"}
+        r = limited_client.post(
+            "/jobs", headers=headers, json={"type": "email", "payload": {}}
+        )
+        assert r.status_code == 401

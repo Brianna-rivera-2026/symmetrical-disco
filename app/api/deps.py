@@ -58,4 +58,5 @@ async def get_current_user(
     app_metrics.auth_validations.add(1, {"result": "ok", "source": source})
     trace.get_current_span().set_attribute("enduser.id", str(user.id))
     with bind_log_context(user_id=str(user.id), user_name=user.name):
+        request.state.authed_user_id = user.id
         yield user

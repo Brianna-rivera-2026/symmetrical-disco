@@ -34,7 +34,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{ include "jobprocessor.fullname" . }}-redis.{{ .Release.Namespace }}.svc
 {{- end }}
 
-{{/* URLs embed $(DB_PASSWORD)/$(REDIS_PASSWORD): kubelet env-var expansion
+{{/* URLs embed $(DB_APP_PASSWORD)/$(REDIS_PASSWORD): kubelet env-var expansion
      substitutes them from secretKeyRef env vars declared earlier in the
      container spec, keeping passwords out of rendered manifests. */}}
 {{- define "jobprocessor.appDatabaseUrl" -}}

@@ -6,13 +6,26 @@ from fastapi import Request, Response
 from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
 
-from app.users.keys import hash_key
-
 
 async def user_or_ip_identifier(request: Request) -> str:
-    api_key = request.headers.get("X-API-Key")
-    if api_key:
-        return "u:" + hash_key(api_key)
+    """Bucket by the *validated* user id set by `get_current_user` on
+    `request.state.authed_user_id` — never by the raw `X-API-Key` header
+    value. Trusting the raw header would let an attacker rotate a fresh,
+    never-seen key on every request to dodge the limiter entirely (garbage
+    keys still hash to a distinct bucket even though they never authenticate).
+
+    Falls back to the client IP when no validated identity is present
+    (routes with no `get_current_user` dependency, e.g. the anonymous
+    `/stats` endpoint). That IP fallback is only as trustworthy as the
+    deployment's `forwarded_allow_ips`/proxy-header trust configuration —
+    it authenticates the immediate connection to the trusted proxy, not the
+    contents of the forwarded-for chain, so it's best-effort abuse
+    mitigation rather than a hard guarantee. `/stats` has no stronger
+    identity to fall back on since it's intentionally unauthenticated.
+    """
+    authed_user_id = getattr(request.state, "authed_user_id", None)
+    if authed_user_id is not None:
+        return "u:" + str(authed_user_id)
     host = request.client.host if request.client else "unknown"
     return "ip:" + host
 
