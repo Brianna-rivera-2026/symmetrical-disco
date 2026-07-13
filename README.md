@@ -284,3 +284,37 @@ Revocation (either environment): remove the user's row from the `users`
 table (takes effect within `AUTH_CACHE_TTL_S`, default 60s), or rotate their
 key. Users removed from the secret file are NOT auto-deleted (upsert-only
 sync).
+
+## Webhook host / email domain allowlists
+
+`webhook` and `email` jobs are checked against an allowlist both at submission
+(`POST /jobs` → `422` if rejected) and again by the worker immediately before
+execution (fails the job non-retryably — enqueued-but-now-disallowed jobs
+can't slip through). Two `Settings` fields, both **empty by default, which
+denies every job of that type** (secure default — nothing is permitted until
+explicitly configured):
+
+- `webhook_allowed_hosts: list[str]` (`WEBHOOK_ALLOWED_HOSTS`) — matched
+  against `WebhookPayload.url`'s host as a **suffix with a label boundary**:
+  `"hooks.example.com"` allows `hooks.example.com` and `a.hooks.example.com`,
+  but not `evilhooks.example.com`. Webhook URLs must also be `https://`.
+- `email_allowed_domains: list[str]` (`EMAIL_ALLOWED_DOMAINS`) — matched
+  against the exact domain part of `EmailPayload.to`, case-insensitive.
+
+**docker-compose** (dev): JSON-encoded env vars, already set permissively per
+service in `docker-compose.yml` (`WEBHOOK_ALLOWED_HOSTS`,
+`EMAIL_ALLOWED_DOMAINS`) — edit those lines to change what dev accepts.
+
+**Helm** (production): `security.webhookAllowedHosts` /
+`security.emailAllowedDomains` in
+[`deploy/chart/jobprocessor/values.yaml`](deploy/chart/jobprocessor/values.yaml),
+shipped as `[]` (deny all). Set them before going live:
+
+    helm upgrade jp deploy/chart/jobprocessor -n <namespace> --reuse-values \
+      --set security.webhookAllowedHosts='{hooks.example.com}' \
+      --set security.emailAllowedDomains='{example.com}'
+
+**Gotcha:** a fresh install or an upgrade that doesn't set these leaves both
+lists empty — every email and webhook job will `422` at submission (and any
+already-queued ones fail permanently at the worker). Set them as part of your
+first install, not as an afterthought.
