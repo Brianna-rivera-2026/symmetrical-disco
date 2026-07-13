@@ -453,20 +453,28 @@ Add a new except branch **before** the generic `except Exception` (after the `as
 
 (`rate_limit_enabled=False` is consumed by Task 5; harmless before it.)
 
-- [ ] **Step 7: Write the failing worker integration test** — append to `tests/integration/test_worker.py`, following that file's existing fixture pattern for running one job through the worker (reuse its helpers for enqueuing and running a cycle; the key assertions):
+- [ ] **Step 7: Write the failing worker integration test** — append to `tests/integration/test_worker.py`, matching the exact fixture signature and direct `process_job` call used by every other test in that file (e.g. `test_process_job_completes_email` at the top of the file):
 
 ```python
-async def test_policy_violation_fails_without_retry(...existing fixtures...):
-    # enqueue a webhook job whose host is NOT in webhook_allowed_hosts
-    # (insert the row directly via repo.create_job with payload
-    #  {"url": "https://evil.test/x"}, then enqueue and run one worker cycle)
-    job = await repo.get_job(session, job_id)
+async def test_policy_violation_fails_without_retry(
+    db_session, redis_client, test_settings, owner_id
+):
+    job = await repo.create_job(
+        db_session,
+        JobType.webhook,
+        {"url": "https://evil.test/x"},  # not in test_settings.webhook_allowed_hosts
+        user_id=owner_id,
+    )
+    outcome = await process_job(db_session, redis_client, test_settings, job.id)
+    assert outcome.label == "policy_rejected"
+    assert outcome.ack is True
+    await db_session.refresh(job)
     assert job.status is JobStatus.failed
-    assert job.attempts <= 1                      # no retry ladder
+    assert job.attempts == 1        # fail_job increments once; no retry ladder beyond it
     assert job.error["type"] == "PayloadPolicyError"
 ```
 
-Adapt the setup lines to the file's existing conventions (look at the nearest test that drives a job to `failed`). The assertion block above is the contract.
+`test_settings` (from `tests/integration/conftest.py`, updated in Step 6 below) sets `webhook_allowed_hosts=["x.test"]`, so `evil.test` is correctly rejected.
 
 - [ ] **Step 8: Run tests**
 
