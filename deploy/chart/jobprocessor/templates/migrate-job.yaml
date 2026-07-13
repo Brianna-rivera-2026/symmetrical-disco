@@ -26,13 +26,13 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["alembic", "upgrade", "head"]
           env:
-            - name: DB_PASSWORD
+            - name: DB_MIGRATOR_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "jobprocessor.fullname" . }}-credentials
-                  key: db-password
+                  key: db-migrator-password
             - name: DATABASE_URL
-              value: {{ include "jobprocessor.directDatabaseUrl" . | quote }}
+              value: {{ include "jobprocessor.migratorDatabaseUrl" . | quote }}
             - name: REDIS_URL   # Settings requires it even though alembic doesn't use Redis
               value: rediss://unused:6379/0
           volumeMounts:

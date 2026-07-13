@@ -62,3 +62,8 @@ tls:
 secrets:
   # created out-of-band by deploy/openshift/init-secrets.sh; key: api_user_keys.json
   apiUserKeysSecret: jobprocessor-api-user-keys
+
+security:
+  # Empty lists = deny all webhook/email jobs (secure default). Set per env.
+  webhookAllowedHosts: []
+  emailAllowedDomains: []

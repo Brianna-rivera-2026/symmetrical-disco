@@ -33,6 +33,16 @@ spec:
                   key: db-password
             - name: POSTGRESQL_MAX_CONNECTIONS
               value: {{ .Values.postgres.maxConnections | quote }}
+            - name: APP_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "jobprocessor.fullname" . }}-credentials
+                  key: db-app-password
+            - name: MIGRATOR_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "jobprocessor.fullname" . }}-credentials
+                  key: db-migrator-password
           ports:
             - containerPort: 5432
           readinessProbe:
@@ -54,6 +64,9 @@ spec:
             - name: tls-conf
               mountPath: /opt/app-root/src/postgresql-cfg
               readOnly: true
+            - name: db-init
+              mountPath: /opt/app-root/src/postgresql-start
+              readOnly: true
       volumes:
         - name: tls
           secret:
@@ -64,6 +77,9 @@ spec:
         - name: tls-conf
           configMap:
             name: {{ include "jobprocessor.fullname" . }}-postgres-tls-conf
+        - name: db-init
+          configMap:
+            name: {{ include "jobprocessor.fullname" . }}-db-init
   volumeClaimTemplates:
     - metadata:
         name: data

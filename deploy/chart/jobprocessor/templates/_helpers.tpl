@@ -38,11 +38,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
      substitutes them from secretKeyRef env vars declared earlier in the
      container spec, keeping passwords out of rendered manifests. */}}
 {{- define "jobprocessor.appDatabaseUrl" -}}
-postgresql+psycopg://{{ .Values.postgres.user }}:$(DB_PASSWORD)@{{ include "jobprocessor.pgbouncerHost" . }}:6432/{{ .Values.postgres.database }}{{- if .Values.tls.appToPgbouncer -}}?sslmode=verify-full&sslrootcert=/etc/pki/service-ca/ca.crt{{- end -}}
+postgresql+psycopg://jobs_app:$(DB_APP_PASSWORD)@{{ include "jobprocessor.pgbouncerHost" . }}:6432/{{ .Values.postgres.database }}{{- if .Values.tls.appToPgbouncer -}}?sslmode=verify-full&sslrootcert=/etc/pki/service-ca/ca.crt{{- end -}}
 {{- end }}
 
-{{- define "jobprocessor.directDatabaseUrl" -}}
-postgresql+psycopg://{{ .Values.postgres.user }}:$(DB_PASSWORD)@{{ include "jobprocessor.postgresHost" . }}:5432/{{ .Values.postgres.database }}?sslmode=verify-full&sslrootcert=/etc/pki/service-ca/ca.crt
+{{- define "jobprocessor.appDirectDatabaseUrl" -}}
+postgresql+psycopg://jobs_app:$(DB_APP_PASSWORD)@{{ include "jobprocessor.postgresHost" . }}:5432/{{ .Values.postgres.database }}?sslmode=verify-full&sslrootcert=/etc/pki/service-ca/ca.crt
+{{- end }}
+
+{{- define "jobprocessor.migratorDatabaseUrl" -}}
+postgresql+psycopg://jobs_migrator:$(DB_MIGRATOR_PASSWORD)@{{ include "jobprocessor.postgresHost" . }}:5432/{{ .Values.postgres.database }}?sslmode=verify-full&sslrootcert=/etc/pki/service-ca/ca.crt
 {{- end }}
 
 {{- define "jobprocessor.redisUrl" -}}
@@ -51,11 +55,11 @@ rediss://:$(REDIS_PASSWORD)@{{ include "jobprocessor.redisHost" . }}:6379/0?ssl_
 
 {{/* Shared env block for app containers (api/worker/ticker). */}}
 {{- define "jobprocessor.appEnv" -}}
-- name: DB_PASSWORD
+- name: DB_APP_PASSWORD
   valueFrom:
     secretKeyRef:
       name: {{ include "jobprocessor.fullname" . }}-credentials
-      key: db-password
+      key: db-app-password
 - name: REDIS_PASSWORD
   valueFrom:
     secretKeyRef:
@@ -67,6 +71,10 @@ rediss://:$(REDIS_PASSWORD)@{{ include "jobprocessor.redisHost" . }}:6379/0?ssl_
   value: {{ include "jobprocessor.redisUrl" . | quote }}
 - name: DB_DISABLE_PREPARED_STATEMENTS
   value: "true"
+- name: WEBHOOK_ALLOWED_HOSTS
+  value: {{ .Values.security.webhookAllowedHosts | toJson | quote }}
+- name: EMAIL_ALLOWED_DOMAINS
+  value: {{ .Values.security.emailAllowedDomains | toJson | quote }}
 {{- if .Values.otel.enabled }}
 {{- if not .Values.otel.exporterEndpoint }}
 {{- fail "otel.exporterEndpoint must be set (to the cluster's existing OpenTelemetry collector) when otel.enabled=true" }}

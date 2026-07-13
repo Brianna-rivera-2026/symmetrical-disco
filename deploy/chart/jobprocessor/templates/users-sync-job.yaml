@@ -24,13 +24,13 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["python", "-m", "app.users.sync"]
           env:
-            - name: DB_PASSWORD
+            - name: DB_APP_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "jobprocessor.fullname" . }}-credentials
-                  key: db-password
+                  key: db-app-password
             - name: DATABASE_URL
-              value: {{ include "jobprocessor.directDatabaseUrl" . | quote }}
+              value: {{ include "jobprocessor.appDirectDatabaseUrl" . | quote }}
             - name: REDIS_URL
               value: rediss://unused:6379/0
             # CRI-O bind-mounts RHEL entitlement secrets over /run/secrets on

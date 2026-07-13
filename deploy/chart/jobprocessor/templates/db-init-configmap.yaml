@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "jobprocessor.fullname" . }}-db-init
+  labels:
+    {{- include "jobprocessor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+data:
+  01-roles.sh: |
+{{ .Files.Get "files/db-init/01-roles.sh" | indent 4 }}

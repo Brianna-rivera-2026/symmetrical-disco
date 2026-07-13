@@ -27,6 +27,8 @@ spec:
             {{- include "jobprocessor.appEnv" . | nindent 12 }}
             - name: DB_POOL_SIZE
               value: {{ .Values.api.dbPoolSize | quote }}
+            - name: FORWARDED_ALLOW_IPS
+              value: "*"   # safe: api-ingress netpol only admits the router on :8000
           ports:
             - containerPort: 8000
           readinessProbe:
