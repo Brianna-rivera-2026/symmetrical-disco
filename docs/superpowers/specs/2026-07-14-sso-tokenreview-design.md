@@ -56,9 +56,14 @@ Per request, `get_current_user` in `app/api/deps.py`:
 
    Two tokens per call: the pod's own SA token authenticates *the API
    service* to the apiserver; the user's token is payload being reviewed.
-   The SA token file is re-read on each TokenReview call (cheap at
-   cache-miss frequency) so kubelet rotation of the projected token is
-   picked up without a restart. TLS verifies against `auth_ca_file`.
+   The SA token is read once at startup and held in memory; kubelet
+   rotation of the projected token is handled reactively — an HTTP **401
+   from the apiserver** (which can only mean *our* credential is stale:
+   a bad user token still yields 200 + `authenticated: false`) triggers
+   one re-read of `auth_sa_token_file` and a single retry. Still 401
+   after retry → 503 (misconfigured SA). This avoids a synchronous file
+   read on the event loop per cache miss. TLS verifies against
+   `auth_ca_file`.
 4. `status.authenticated == false` → **401**.
 5. Group gate: `auth_required_group` ∉ `status.user.groups` → **403**.
    (This also excludes ServiceAccount tokens unless deliberately added to
@@ -153,7 +158,7 @@ step.
 | Setting | Default | Notes |
 |---|---|---|
 | `auth_tokenreview_url` | `https://kubernetes.default.svc/apis/authentication.k8s.io/v1/tokenreviews` | tests/compose override |
-| `auth_sa_token_file` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | re-read per call |
+| `auth_sa_token_file` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | read at startup; re-read on apiserver 401 (retry once) |
 | `auth_ca_file` | `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` | httpx `verify=` |
 | `auth_required_group` | `jobprocessor-users` | group gate |
 | `auth_cache_ttl_s` | `60.0` (existing) | token-validation cache |
@@ -172,7 +177,8 @@ path).
 - **Unit tests:** mount it in httpx via `ASGITransport` — no sockets. Cover:
   valid+in-group (200), wrong group (403), unknown token (401), missing
   header (401), apiserver error (503), cache hit skips second TokenReview
-  call, uid→`AuthedUser` mapping.
+  call, uid→`AuthedUser` mapping, and SA-token rotation: apiserver 401 →
+  token file re-read → retried call succeeds; persistent 401 → 503.
 - **Integration tests:** run the fake on a local socket (uvicorn task in a
   fixture), point `auth_tokenreview_url` at it over plain HTTP (an
   `auth_ca_file` of `""`/unset disables custom verify for http URLs).
