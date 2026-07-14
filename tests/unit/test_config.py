@@ -129,3 +129,18 @@ def test_security_settings_defaults():
     assert s.webhook_allowed_hosts == []
     assert s.email_allowed_domains == []
     assert s.max_request_body_bytes == 262144
+
+
+def test_tokenreview_settings_defaults():
+    settings = Settings(database_url="postgresql://x/x", redis_url="redis://x")
+    assert settings.auth_tokenreview_url == (
+        "https://kubernetes.default.svc/apis/authentication.k8s.io/v1/tokenreviews"
+    )
+    assert settings.auth_sa_token_file == (
+        "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    )
+    assert settings.auth_ca_file == (
+        "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    )
+    assert settings.auth_required_group == "jobprocessor-users"
+    assert settings.auth_timeout_s == 2.0

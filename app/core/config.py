@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     db_disable_prepared_statements: bool = False
     worker_max_rss_mb: int | None = None
     auth_cache_ttl_s: float = 60.0
+    auth_tokenreview_url: str = (
+        "https://kubernetes.default.svc/apis/authentication.k8s.io/v1/tokenreviews"
+    )
+    auth_sa_token_file: str = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    auth_ca_file: str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    auth_required_group: str = "jobprocessor-users"
+    auth_timeout_s: float = 2.0
     otel_enabled: bool = False
     otel_exporter_otlp_endpoint: str = "http://localhost:4317"
     health_port: int | None = None
