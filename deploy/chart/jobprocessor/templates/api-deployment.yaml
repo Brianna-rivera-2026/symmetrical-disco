@@ -17,6 +17,7 @@ spec:
         {{- include "jobprocessor.labels" . | nindent 8 }}
         app.kubernetes.io/component: api
     spec:
+      serviceAccountName: {{ include "jobprocessor.fullname" . }}-api
       terminationGracePeriodSeconds: 30
       # Soft spread (ScheduleAnyway): prefer distinct nodes so one node
       # failure can't take every replica, but never block scheduling on
@@ -49,6 +50,8 @@ spec:
                            # authenticates the immediate connection, not the XFF chain
                            # contents -- IP-based rate-limit fallback (unauthenticated
                            # /stats only) is best-effort, not a hard guarantee
+            - name: AUTH_REQUIRED_GROUP
+              value: {{ .Values.auth.requiredGroup | quote }}
           ports:
             - containerPort: 8000
           readinessProbe:

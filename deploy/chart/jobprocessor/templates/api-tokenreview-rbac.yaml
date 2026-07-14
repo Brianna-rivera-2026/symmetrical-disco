@@ -1,0 +1,21 @@
+{{- if .Values.auth.rbac.create }}
+# Lets ONLY the API pods create TokenReviews (delegated authentication).
+# Deliberately not bound to the namespace default SA — workers/hooks must
+# not inherit apiserver access. Cluster-scoped: set auth.rbac.create=false
+# if bindings are managed out-of-band.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "jobprocessor.fullname" . }}-api-tokenreview
+  labels:
+    {{- include "jobprocessor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "jobprocessor.fullname" . }}-api
+    namespace: {{ .Release.Namespace }}
+{{- end }}

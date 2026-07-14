@@ -9,8 +9,20 @@ Idempotent (safe to re-run). Installs, via OLM:
 - **Custom Metrics Autoscaler** (KEDA, `openshift-keda` namespace) — required only when `keda.enabled=true`. CRDs: `scaledobjects.keda.sh/v1alpha1`, `triggerauthentications.keda.sh/v1alpha1`.
 - **Red Hat build of OpenTelemetry** (operator, `openshift-operators` namespace) plus a shared `OpenTelemetryCollector` CR — required only when `otel.enabled=true`. This chart does not deploy its own collector; apps export OTLP directly to this cluster-wide one. The script prints the resulting endpoint (default: `http://otel-collector.observability.svc.cluster.local:4317`) — pass it as `otel.exporterEndpoint` when installing the chart. `helm template` fails fast if `otel.enabled=true` and `otel.exporterEndpoint` is empty. Because the collector isn't owned by this chart, the app-egress NetworkPolicy opens port 4317 to any destination rather than a specific pod selector. Set `OTEL_EXPORTER_ENDPOINT=<url>` before running the script to also forward the shared collector's output to an external backend, in addition to its debug exporter.
 
+## Authentication setup
+Before deploying this chart, the cluster operator must configure an identity provider (e.g., LDAP, OIDC, htpasswd) and create a group for API users:
+
+    deploy/openshift/setup-idp.sh
+
+This creates a group (default: `jobprocessor-users`) and associates users with it. After setup, users authenticate via:
+
+    oc login https://api.example.com:6443   # prompts for user/password
+    TOKEN=$(oc whoami -t)
+    curl -H "Authorization: Bearer $TOKEN" https://api.jobprocessor.example.com/jobs
+
+Configure the required group and RBAC creation via `auth.requiredGroup` and `auth.rbac.create` in `values.yaml`.
+
 ## Install
-    deploy/openshift/init-secrets.sh <namespace> jobprocessor-api-user-keys alice bob
     helm install jp deploy/chart/jobprocessor -n <namespace>
 
 ## Connection math (enforced at template time)

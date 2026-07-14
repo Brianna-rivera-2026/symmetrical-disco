@@ -89,9 +89,12 @@ redis:
 tls:
   appToPgbouncer: true
 
-secrets:
-  # created out-of-band by deploy/openshift/init-secrets.sh; key: api_user_keys.json
-  apiUserKeysSecret: jobprocessor-api-user-keys
+auth:
+  # Cluster group whose members may use the API (TokenReview group gate).
+  requiredGroup: jobprocessor-users
+  rbac:
+    # ClusterRoleBinding of system:auth-delegator to the API SA.
+    create: true
 
 security:
   # Empty lists = deny all webhook/email jobs (secure default). Set per env.
