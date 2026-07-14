@@ -39,7 +39,7 @@ ticker:
     requests: { cpu: 50m, memory: 128Mi }
     limits: { memory: 384Mi }
 
-# Short-lived Helm hook Jobs (migrate, users-sync); namespaces with a
+# Short-lived Helm hook Jobs (migrate); namespaces with a
 # ResourceQuota reject request-less pods, hooks included.
 hooks:
   resources:

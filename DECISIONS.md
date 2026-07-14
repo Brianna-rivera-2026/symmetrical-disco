@@ -281,3 +281,34 @@ already-installed operators are unaffected) over the VM's SSH port
 (`crc podman-env` reveals the key/port; `oc debug node` itself couldn't
 schedule while disk pressure was active — a chicken-and-egg worth knowing
 about if this recurs).
+
+---
+
+## 7. SSO Migration: API Keys → Kubernetes TokenReview — Task 9 (2026-07-14)
+
+**Approach chosen:** Authentication delegated entirely to the cluster.
+Requests carry a bearer token (`Authorization: Bearer <token>`) that the API
+validates by calling the Kubernetes `TokenReview` API (the cluster's
+apiserver in production, the `fake-tokenreview` sidecar in local dev) —
+there is no local password/key store or `users` table in the application
+database anymore.
+
+**Ownership:** Jobs are scoped by `user_id`, populated from the OpenShift
+User's UID (`status.user.uid` in the `TokenReview` response) rather than a
+locally-issued identifier. This ties job ownership directly to the cluster's
+notion of identity, so a user's job history survives credential rotation and
+matches whatever the cluster's identity provider (htpasswd IdP via
+`deploy/openshift/setup-idp.sh`) considers that user to be.
+
+**Authorization gate:** A successfully-authenticated token is only accepted
+if its `status.user.groups` includes `jobprocessor-users` (configurable via
+`auth_required_group`); this is the single authorization check, applied
+before any route logic runs. The group is provisioned cluster-wide by
+`setup-idp.sh`, not by the application.
+
+**What was removed:** the `X-API-Key` header scheme, the `users` DB table
+and its migration, `app/users/sync.py`, the `api_user_keys_file` setting,
+and `deploy/openshift/init-secrets.sh`. `docker-compose.yml`'s dev-only
+`users-sync` service and inline `configs: api_user_keys` block were replaced
+by the `fake-tokenreview` sidecar with two baked-in dev tokens (`dev-alice`,
+`dev-bob`; see `tests/support/fake_tokenreview.py`).

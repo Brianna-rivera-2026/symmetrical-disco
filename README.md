@@ -235,15 +235,23 @@ cluster's OpenShift identity provider.
 
 ### Local development
 
-`docker-compose.yml` hardcodes two fixed dev-only users directly (via an
-inline `configs:` entry, no secret file) — `alice` / `dev-alice-local-only`
-and `bob` / `dev-bob-local-only`. Safe to commit: these are throwaway local
-values, never real credentials. The API service is configured with
-`auth.type: local_api_key` for development (see `docker-compose.yml`
-`JOBPROCESSOR_AUTH_TYPE`).
+`docker-compose.yml` runs a `fake-tokenreview` sidecar — a dev-only stand-in
+for the cluster apiserver's TokenReview endpoint
+(`tests/support/fake_tokenreview.py`) — and points the `api` service at it via
+`AUTH_TOKENREVIEW_URL`. It answers two baked-in dev tokens: `dev-alice`
+(user `alice`) and `dev-bob` (user `bob`), both in the `jobprocessor-users`
+group. Safe to commit: these are throwaway local values, never real
+credentials.
 
-**Add or remove a dev user:** edit the inline JSON under `configs: api_user_keys`
-at the bottom of `docker-compose.yml`, then restart the API service.
+**Try it:**
+
+    docker compose up
+    curl -H "Authorization: Bearer dev-alice" http://localhost:8000/jobs
+
+**Add or remove a dev user:** edit `DEFAULT_DEV_TOKENS` in
+`tests/support/fake_tokenreview.py` (or pass a `FAKE_TOKENS` JSON env var to
+the `fake-tokenreview` service in `docker-compose.yml` to override without
+touching the file), then restart the `fake-tokenreview` and `api` services.
 
 ### OpenShift (production)
 
