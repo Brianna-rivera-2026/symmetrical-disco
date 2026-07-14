@@ -405,8 +405,7 @@ async def test_cancel_job_guarded_terminal(db_session):
 
 
 async def test_get_by_idempotency_key(db_session):
-    owner = await repo.upsert_user(db_session, "owner", "h-owner")
-    await db_session.commit()
+    owner = uuid.uuid4()
     key = "abc"
     assert await repo.get_by_idempotency_key(db_session, key, owner) is None
     job = await repo.create_job(
@@ -441,37 +440,11 @@ async def test_create_job_trace_context_defaults_to_none(db_session):
     assert job.trace_context is None
 
 
-async def test_upsert_user_inserts_then_rotates(db_session):
-    from sqlalchemy import select
-
-    from app.models.user import User
-
-    uid1 = await repo.upsert_user(db_session, "alice", "hash-one")
-    await db_session.commit()
-    uid2 = await repo.upsert_user(db_session, "alice", "hash-two")
-    await db_session.commit()
-
-    assert uid1 == uid2  # same row, key rotated
-    row = (
-        await db_session.execute(select(User).where(User.name == "alice"))
-    ).scalar_one()
-    assert row.key_hash == "hash-two"
-
-
-async def test_get_user_by_key_hash(db_session):
-    uid = await repo.upsert_user(db_session, "alice", "hash-one")
-    await db_session.commit()
-    found = await repo.get_user_by_key_hash(db_session, "hash-one")
-    assert found is not None and found.id == uid
-    assert await repo.get_user_by_key_hash(db_session, "wrong") is None
-
-
 async def test_get_job_scoped_to_owner(db_session):
     from app.schemas.enums import JobType
 
-    owner = await repo.upsert_user(db_session, "owner", "h-owner")
-    other = await repo.upsert_user(db_session, "other", "h-other")
-    await db_session.commit()
+    owner = uuid.uuid4()
+    other = uuid.uuid4()
     job = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "s"}, user_id=owner
     )
@@ -484,9 +457,8 @@ async def test_get_job_scoped_to_owner(db_session):
 async def test_list_jobs_scoped_to_owner(db_session):
     from app.schemas.enums import JobType
 
-    owner = await repo.upsert_user(db_session, "owner", "h-owner")
-    other = await repo.upsert_user(db_session, "other", "h-other")
-    await db_session.commit()
+    owner = uuid.uuid4()
+    other = uuid.uuid4()
     mine = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "s"}, user_id=owner
     )
@@ -501,9 +473,8 @@ async def test_list_jobs_scoped_to_owner(db_session):
 async def test_idempotency_lookup_scoped_per_user(db_session):
     from app.schemas.enums import JobType
 
-    owner = await repo.upsert_user(db_session, "owner", "h-owner")
-    other = await repo.upsert_user(db_session, "other", "h-other")
-    await db_session.commit()
+    owner = uuid.uuid4()
+    other = uuid.uuid4()
     job = await repo.create_job(
         db_session,
         JobType.email,

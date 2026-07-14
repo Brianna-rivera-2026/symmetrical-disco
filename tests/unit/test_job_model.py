@@ -28,6 +28,7 @@ def test_job_table_and_columns():
         "idempotency_hash",
         "trace_context",
         "user_id",
+        "user_name",
     }
 
 

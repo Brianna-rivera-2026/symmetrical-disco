@@ -30,7 +30,7 @@ ticker_reconciled = _meter.create_counter(
     "ticker.reconciled", description="Unsynced jobs re-handed to Redis"
 )
 auth_validations = _meter.create_counter(
-    "auth.validations", description="API key auth attempts by result and source"
+    "auth.validations", description="Bearer token auth attempts by result and source"
 )
 jobs_dropped_ownerless = _meter.create_counter(
     "jobs.dropped_ownerless", description="Jobs dropped by the worker ownerless guard"

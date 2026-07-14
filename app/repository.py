@@ -1,14 +1,11 @@
-import uuid as uuid_mod
 from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import func, select, tuple_, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cursor import decode_cursor, encode_cursor
 from app.models.job import Job
-from app.models.user import User
 from app.schemas.enums import JobPriority, JobStatus, JobType
 
 
@@ -29,6 +26,7 @@ async def create_job(
     idempotency_hash: str | None = None,
     trace_context: dict | None = None,
     user_id: UUID | None = None,
+    user_name: str | None = None,
 ) -> Job:
     job = Job(
         type=job_type,
@@ -41,6 +39,7 @@ async def create_job(
         idempotency_hash=idempotency_hash,
         trace_context=trace_context,
         user_id=user_id,
+        user_name=user_name,
     )
     session.add(job)
     await session.commit()
@@ -299,21 +298,3 @@ async def count_by_status(session: AsyncSession) -> list[tuple[JobStatus, int]]:
     return (
         await session.execute(select(Job.status, func.count()).group_by(Job.status))
     ).all()
-
-
-async def upsert_user(session: AsyncSession, name: str, key_hash: str) -> UUID:
-    """Insert a user or rotate their key hash. Does NOT commit — the caller
-    owns the transaction so multi-user syncs stay atomic."""
-    stmt = (
-        pg_insert(User)
-        .values(id=uuid_mod.uuid4(), name=name, key_hash=key_hash)
-        .on_conflict_do_update(index_elements=["name"], set_={"key_hash": key_hash})
-        .returning(User.id)
-    )
-    return (await session.execute(stmt)).scalar_one()
-
-
-async def get_user_by_key_hash(session: AsyncSession, key_hash: str) -> User | None:
-    return (
-        await session.execute(select(User).where(User.key_hash == key_hash))
-    ).scalar_one_or_none()

@@ -1,5 +1,6 @@
 """Per-user rate limiting (spec §1): fastapi-limiter dependencies keyed by
-API-key hash, falling back to client IP for unauthenticated requests."""
+the validated cluster identity, falling back to client IP for
+unauthenticated requests."""
 
 import redis as pyredis
 from fastapi import Request, Response
@@ -9,10 +10,10 @@ from fastapi_limiter.depends import RateLimiter
 
 async def user_or_ip_identifier(request: Request) -> str:
     """Bucket by the *validated* user id set by `get_current_user` on
-    `request.state.authed_user_id` — never by the raw `X-API-Key` header
-    value. Trusting the raw header would let an attacker rotate a fresh,
-    never-seen key on every request to dodge the limiter entirely (garbage
-    keys still hash to a distinct bucket even though they never authenticate).
+    `request.state.authed_user_id` — never by the raw bearer token value.
+    Trusting the raw token would let an attacker rotate a fresh,
+    never-seen token on every request to dodge the limiter entirely (garbage
+    tokens still hash to a distinct bucket even though they never authenticate).
 
     Falls back to the client IP when no validated identity is present
     (routes with no `get_current_user` dependency, e.g. the anonymous

@@ -9,13 +9,14 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from app.api.middleware import BodySizeLimitMiddleware
 from app.api.ratelimit import user_or_ip_identifier
 from app.api.routes import router
+from app.auth.cache import TokenCache
+from app.auth.tokenreview import TokenReviewer
 from app.core.config import Settings, get_settings
 from app.core.db import make_engine, make_session_factory
 from app.core.logging import configure_logging
 from app.core.redis import create_redis_client
 from app.core.telemetry import configure_telemetry, shutdown_telemetry
 from app.queue.consumer import ensure_group
-from app.users.keys import KeyCache
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -30,6 +31,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     session_factory = make_session_factory(engine)
     redis_client = create_redis_client(settings.redis_url)
+    token_reviewer = TokenReviewer(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -39,6 +41,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await FastAPILimiter.init(redis_client, identifier=user_or_ip_identifier)
         yield
         await redis_client.aclose()
+        await token_reviewer.aclose()
         await engine.dispose()
         shutdown_telemetry()
 
@@ -52,7 +55,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.session_factory = session_factory
     app.state.redis = redis_client
-    app.state.key_cache = KeyCache(ttl_s=settings.auth_cache_ttl_s)
+    app.state.token_cache = TokenCache(ttl_s=settings.auth_cache_ttl_s)
+    app.state.token_reviewer = token_reviewer
     app.include_router(router)
     if settings.otel_enabled:
         FastAPIInstrumentor.instrument_app(app)

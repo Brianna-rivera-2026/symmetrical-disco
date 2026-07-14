@@ -45,7 +45,6 @@ class Settings(BaseSettings):
     otel_enabled: bool = False
     otel_exporter_otlp_endpoint: str = "http://localhost:4317"
     health_port: int | None = None
-    api_user_keys_file: str = "/run/secrets/api_user_keys"
     rate_limit_enabled: bool = True
     submit_rate_limit_per_min: int = 20
     control_rate_limit_per_min: int = 30

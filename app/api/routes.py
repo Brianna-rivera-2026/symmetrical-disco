@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import repository as repo
 from app.api.deps import get_current_user, get_db, get_redis
 from app.api.ratelimit import rate_limit
+from app.auth.identity import AuthedUser
 from app.core import metrics as app_metrics
 from app.core.telemetry import current_trace_carrier
 from app.idempotency import canonical_hash
@@ -30,7 +31,6 @@ from app.schemas.api import (
 )
 from app.schemas.enums import JobPriority, JobStatus, JobType
 from app.schemas.payloads import validate_payload
-from app.users.keys import AuthedUser
 
 router = APIRouter()
 log = logging.getLogger("app.api")
@@ -76,7 +76,7 @@ async def stats(
 
 
 async def _create_and_handoff(
-    session, client, settings, submission, key, req_hash, user_id
+    session, client, settings, submission, key, req_hash, user_id, user_name
 ):
     scheduled_at = submission.scheduled_at
     if scheduled_at is not None and scheduled_at > datetime.now(timezone.utc):
@@ -92,6 +92,7 @@ async def _create_and_handoff(
             idempotency_hash=req_hash,
             trace_context=current_trace_carrier(),
             user_id=user_id,
+            user_name=user_name,
         )
         await schedule(
             client, settings.delayed_zset, str(job.id), scheduled_at.timestamp()
@@ -107,6 +108,7 @@ async def _create_and_handoff(
             idempotency_hash=req_hash,
             trace_context=current_trace_carrier(),
             user_id=user_id,
+            user_name=user_name,
         )
         await enqueue(
             client, settings.stream_for_priority(submission.priority), str(job.id)
@@ -166,7 +168,7 @@ async def submit_job(
     key = submission.idempotency_key
     if key is None:
         job = await _create_and_handoff(
-            session, client, settings, submission, None, None, user.id
+            session, client, settings, submission, None, None, user.id, user.name
         )
         return _accepted(job)
 
@@ -176,7 +178,7 @@ async def submit_job(
         return await _replay_or_conflict(existing, req_hash, response)
     try:
         job = await _create_and_handoff(
-            session, client, settings, submission, key, req_hash, user.id
+            session, client, settings, submission, key, req_hash, user.id, user.name
         )
     except IntegrityError:
         await session.rollback()
