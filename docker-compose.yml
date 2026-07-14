@@ -42,24 +42,21 @@ services:
       postgres:
         condition: service_healthy
 
-  users-sync:
+  fake-tokenreview:
     build: .
     image: jobprocessor-app:${APP_TAG:-dev}
-    command: python -m app.users.sync
+    # Dev-only stand-in for the cluster apiserver's TokenReview endpoint.
+    # Baked-in tokens: dev-alice / dev-bob (see tests/support/fake_tokenreview.py).
+    command: python -m tests.support.fake_tokenreview
     environment:
-      DATABASE_URL: postgresql+psycopg://jobs_app:jobs_app@postgres:5432/jobs
-      REDIS_URL: redis://redis:6379/0
-    # Dev-only fixed keys, inlined here instead of a git-ignored secret file
-    # -- fine to commit since these are throwaway local values, never real
-    # credentials (production uses TokenReview-based authentication via the
-    # cluster's OpenShift identity provider; see deploy/openshift/setup-idp.sh).
-    # Mounted at the path Settings.api_user_keys_file already defaults to.
-    configs:
-      - source: api_user_keys
-        target: /run/secrets/api_user_keys
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
+      PORT: "8443"
+      PYTHONPATH: /app
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8443/health').status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   api:
     build: .
@@ -69,6 +66,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       WEBHOOK_ALLOWED_HOSTS: '["example.com"]'
       EMAIL_ALLOWED_DOMAINS: '["example.com"]'
+      AUTH_TOKENREVIEW_URL: http://fake-tokenreview:8443/apis/authentication.k8s.io/v1/tokenreviews
     ports:
       - "8000:8000"
     stop_grace_period: 30s
@@ -82,8 +80,8 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-      users-sync:
-        condition: service_completed_successfully
+      fake-tokenreview:
+        condition: service_healthy
       redis:
         condition: service_healthy
 
@@ -140,8 +138,3 @@ services:
 volumes:
   pgdata:
   redisdata:
-
-configs:
-  api_user_keys:
-    content: |
-      {"alice": "dev-alice-local-only", "bob": "dev-bob-local-only"}

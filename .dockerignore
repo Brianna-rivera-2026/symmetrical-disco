@@ -2,7 +2,6 @@
 .venv
 __pycache__
 *.pyc
-tests
 docs
 .pytest_cache
 .ruff_cache
