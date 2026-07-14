@@ -68,7 +68,9 @@ async def _backdate(db_session, job_id):
     await db_session.commit()
 
 
-async def test_reconcile_reenqueues_pending_orphan(db_session, redis_client, test_settings):
+async def test_reconcile_reenqueues_pending_orphan(
+    db_session, redis_client, test_settings
+):
     job = await repo.create_job(
         db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}
     )
@@ -82,7 +84,9 @@ async def test_reconcile_reenqueues_pending_orphan(db_session, redis_client, tes
     assert job.is_synced_to_redis is True
 
 
-async def test_reconcile_readds_scheduled_orphan(db_session, redis_client, test_settings):
+async def test_reconcile_readds_scheduled_orphan(
+    db_session, redis_client, test_settings
+):
     when = datetime(2020, 1, 1, tzinfo=timezone.utc)
     job = await repo.create_job(
         db_session,
@@ -343,7 +347,9 @@ async def test_queue_depth_observations(redis_client, test_settings, sync_redis_
     assert by_stream["normal"] == 0
 
 
-async def test_queue_scheduled_observations(redis_client, test_settings, sync_redis_client):
+async def test_queue_scheduled_observations(
+    redis_client, test_settings, sync_redis_client
+):
     await redis_client.zadd(test_settings.delayed_zset, {"a": 1.0, "b": 2.0})
     observations = queue_scheduled_observations(sync_redis_client, test_settings)
     assert observations[0].value == 2
