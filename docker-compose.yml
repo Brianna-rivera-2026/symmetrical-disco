@@ -51,9 +51,9 @@ services:
       REDIS_URL: redis://redis:6379/0
     # Dev-only fixed keys, inlined here instead of a git-ignored secret file
     # -- fine to commit since these are throwaway local values, never real
-    # credentials (production uses real generated keys in an OpenShift
-    # Secret; see deploy/openshift/init-secrets.sh). Mounted at the path
-    # Settings.api_user_keys_file already defaults to.
+    # credentials (production uses TokenReview-based authentication via the
+    # cluster's OpenShift identity provider; see deploy/openshift/setup-idp.sh).
+    # Mounted at the path Settings.api_user_keys_file already defaults to.
     configs:
       - source: api_user_keys
         target: /run/secrets/api_user_keys

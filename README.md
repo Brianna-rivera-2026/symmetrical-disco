@@ -226,64 +226,52 @@ For the full system design, see the [Phase 1 design](docs/superpowers/specs/2026
 
 ## Authentication
 
-All `/jobs*` routes require a per-user API key in the `X-API-Key` header
-(`/health`, `/ready`, and `/stats` stay open for probes). Jobs are scoped to
-the user that created them — other users' jobs return 404. Users are
-provisioned declaratively from a `{"name": "raw key", ...}` JSON file: the
-one-shot `users-sync` process hashes each key (SHA-256) and upserts it into
-Postgres before the API starts. Raw keys are never stored — only the hash
-reaches the database, and only usernames are logged.
+All `/jobs*` routes require a bearer token in the `Authorization` header
+(`/health`, `/ready`, and `/stats` stay open for probes). Tokens are
+validated server-side using the Kubernetes TokenReview API; the cluster is the
+identity provider (IdP). Jobs are scoped to the user that created them — other
+users' jobs return 404. Users are provisioned by the cluster admin via the
+cluster's OpenShift identity provider.
 
 ### Local development
 
-`docker-compose.yml` hardcodes two fixed dev-only keys directly (via an
+`docker-compose.yml` hardcodes two fixed dev-only users directly (via an
 inline `configs:` entry, no secret file) — `alice` / `dev-alice-local-only`
 and `bob` / `dev-bob-local-only`. Safe to commit: these are throwaway local
-values, never real credentials. `docker compose up` runs `users-sync`
-automatically after migrations, so both users are ready to use immediately.
+values, never real credentials. The API service is configured with
+`auth.type: local_api_key` for development (see `docker-compose.yml`
+`JOBPROCESSOR_AUTH_TYPE`).
 
-**Add, rotate, or remove a key:** edit the inline JSON under `configs:
-api_user_keys` at the bottom of `docker-compose.yml`, then
-`docker compose up users-sync` to re-sync (upsert-only: existing users not in
-the file are left untouched, never auto-deleted).
+**Add or remove a dev user:** edit the inline JSON under `configs: api_user_keys`
+at the bottom of `docker-compose.yml`, then restart the API service.
 
 ### OpenShift (production)
 
-Keys live in a Kubernetes Secret (default name `jobprocessor-api-user-keys`,
-key `api_user_keys.json`), mounted by the chart's `users-sync` hook Job at
-install/upgrade — see `secrets.apiUserKeysSecret` in
-[`deploy/chart/jobprocessor/values.yaml`](deploy/chart/jobprocessor/values.yaml).
+Users are provisioned via the cluster's OpenShift identity provider (OAuth
+system). The API validates tokens using the TokenReview API
+(`auth.type: kubernetes_tokenreview` in the Helm chart).
 
-**Initial setup**, before the first `helm install`:
+**Initial setup**, run ONCE by cluster-admin, before the first `helm install`:
 
-    deploy/openshift/init-secrets.sh <namespace> jobprocessor-api-user-keys alice bob
+    deploy/openshift/setup-idp.sh user1:password1 [user2:password2 ...]
 
-Generates a key per user and creates the Secret; refuses to touch it if it
-already exists (prints the raw keys to stdout once — they aren't recoverable
-after that, only hashes reach the database).
+Configures a cluster-wide htpasswd identity provider and the `jobprocessor-users`
+group. Idempotent: re-running updates passwords and group membership; the OAuth
+IdP entry is only added if absent (see `deploy/openshift/setup-idp.sh` for details).
 
-**Add or rotate a key on an already-running deployment** — the script above
-won't touch an existing Secret, so update it directly and re-run the sync:
+**User login and token retrieval** (once IdP is set up):
 
-    # 1. Decode the existing keys, add/change entries, then re-create the Secret
-    #    (oc create --dry-run=client -o yaml | oc apply -f - updates in place):
-    oc get secret jobprocessor-api-user-keys -n <namespace> \
-      -o jsonpath='{.data.api_user_keys\.json}' | base64 -d > /tmp/keys.json
-    # edit /tmp/keys.json to add/change a user's key
-    oc create secret generic jobprocessor-api-user-keys -n <namespace> \
-      --from-file=api_user_keys.json=/tmp/keys.json \
-      --dry-run=client -o yaml | oc apply -f -
-    rm /tmp/keys.json
+    oc login --username <user> --password <pass>
+    TOKEN=$(oc whoami -t)
+    curl -H "Authorization: Bearer $TOKEN" https://<api-route>/jobs
 
-    # 2. Re-run the users-sync hook Job so Postgres picks up the change.
-    #    The hook Job is deleted on success (hook-delete-policy), so re-trigger
-    #    it via helm upgrade rather than recreating the Job directly:
-    helm upgrade jp deploy/chart/jobprocessor -n <namespace> --reuse-values
+**Add or rotate a user password** on an already-running deployment:
 
-Revocation (either environment): remove the user's row from the `users`
-table (takes effect within `AUTH_CACHE_TTL_S`, default 60s), or rotate their
-key. Users removed from the secret file are NOT auto-deleted (upsert-only
-sync).
+    deploy/openshift/setup-idp.sh user1:newpassword1 [user2:newpassword2 ...]
+
+**Revocation:** remove the user from the htpasswd file by re-running `setup-idp.sh`
+without that user, then invalidate any tokens by revoking them in the OAuth system
+(tokens take effect within `AUTH_CACHE_TTL_S`, default 60s).
 
 ## Webhook host / email domain allowlists
 
