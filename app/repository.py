@@ -55,9 +55,11 @@ async def get_job(
     re-reads). API routes must always pass the caller's id."""
     if user_id is None:
         return await session.get(Job, job_id)
-    return (await session.execute(
-        select(Job).where(Job.id == job_id, Job.user_id == user_id)
-    )).scalar_one_or_none()
+    return (
+        await session.execute(
+            select(Job).where(Job.id == job_id, Job.user_id == user_id)
+        )
+    ).scalar_one_or_none()
 
 
 async def list_jobs(
@@ -94,7 +96,9 @@ async def list_jobs(
 
 
 async def mark_synced(session: AsyncSession, job_id: UUID) -> None:
-    await session.execute(update(Job).where(Job.id == job_id).values(is_synced_to_redis=True))
+    await session.execute(
+        update(Job).where(Job.id == job_id).values(is_synced_to_redis=True)
+    )
     await session.commit()
 
 
@@ -160,7 +164,9 @@ async def retry_to_pending(session: AsyncSession, job_id: UUID) -> bool:
     return res.rowcount == 1
 
 
-async def retry_to_scheduled(session: AsyncSession, job_id: UUID, scheduled_at: datetime) -> bool:
+async def retry_to_scheduled(
+    session: AsyncSession, job_id: UUID, scheduled_at: datetime
+) -> bool:
     res = await session.execute(
         update(Job)
         .where(Job.id == job_id, Job.status == JobStatus.processing)
@@ -193,7 +199,9 @@ async def reset_failed_to_pending(session: AsyncSession, job_id: UUID) -> bool:
     return res.rowcount == 1
 
 
-async def promote_scheduled_to_pending(session: AsyncSession, job_ids: list[UUID]) -> int:
+async def promote_scheduled_to_pending(
+    session: AsyncSession, job_ids: list[UUID]
+) -> int:
     if not job_ids:
         return 0
     result = await session.execute(
@@ -205,7 +213,9 @@ async def promote_scheduled_to_pending(session: AsyncSession, job_ids: list[UUID
     return result.rowcount
 
 
-async def list_unsynced(session: AsyncSession, *, older_than: datetime, limit: int) -> list[Job]:
+async def list_unsynced(
+    session: AsyncSession, *, older_than: datetime, limit: int
+) -> list[Job]:
     stmt = (
         select(Job)
         .where(
@@ -224,9 +234,11 @@ async def get_promotion_info(
 ) -> dict[UUID, tuple[JobPriority, dict | None]]:
     if not job_ids:
         return {}
-    rows = (await session.execute(
-        select(Job.id, Job.priority, Job.trace_context).where(Job.id.in_(job_ids))
-    )).all()
+    rows = (
+        await session.execute(
+            select(Job.id, Job.priority, Job.trace_context).where(Job.id.in_(job_ids))
+        )
+    ).all()
     return {row.id: (row.priority, row.trace_context) for row in rows}
 
 
@@ -273,14 +285,20 @@ async def cancel_job(session: AsyncSession, job_id: UUID, summary: dict) -> bool
     return res.rowcount == 1
 
 
-async def get_by_idempotency_key(session: AsyncSession, key: str, user_id: UUID) -> Job | None:
-    return (await session.execute(
-        select(Job).where(Job.idempotency_key == key, Job.user_id == user_id)
-    )).scalar_one_or_none()
+async def get_by_idempotency_key(
+    session: AsyncSession, key: str, user_id: UUID
+) -> Job | None:
+    return (
+        await session.execute(
+            select(Job).where(Job.idempotency_key == key, Job.user_id == user_id)
+        )
+    ).scalar_one_or_none()
 
 
 async def count_by_status(session: AsyncSession) -> list[tuple[JobStatus, int]]:
-    return (await session.execute(select(Job.status, func.count()).group_by(Job.status))).all()
+    return (
+        await session.execute(select(Job.status, func.count()).group_by(Job.status))
+    ).all()
 
 
 async def upsert_user(session: AsyncSession, name: str, key_hash: str) -> UUID:
@@ -296,6 +314,6 @@ async def upsert_user(session: AsyncSession, name: str, key_hash: str) -> UUID:
 
 
 async def get_user_by_key_hash(session: AsyncSession, key_hash: str) -> User | None:
-    return (await session.execute(
-        select(User).where(User.key_hash == key_hash)
-    )).scalar_one_or_none()
+    return (
+        await session.execute(select(User).where(User.key_hash == key_hash))
+    ).scalar_one_or_none()
