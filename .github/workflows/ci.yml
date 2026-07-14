@@ -28,3 +28,15 @@ jobs:
 
       - name: Run tests
         run: uv run pytest tests/unit tests/integration
+
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint chart
+        run: helm lint deploy/chart/jobprocessor
