@@ -5,11 +5,13 @@ metadata:
   labels:
     {{- include "jobprocessor.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: {{ include "jobprocessor.fullname" . }}-api-tls
 spec:
   selector:
     {{- include "jobprocessor.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
   ports:
-    - name: http
+    - name: https
       port: 8000
       targetPort: 8000

@@ -20,7 +20,7 @@ With shipped defaults:
 Raising `keda.maxReplicas` to 10 makes demand 62 > 60 and `helm template` fails with the exact violation. Set `maxReplicas` so `maxReplicas x worker.dbPoolSize` plus the api/ticker share never exceeds `pgbouncer.maxClientConn`.
 
 ## TLS
-Postgres, Redis (TLS-only), and PgBouncer present OpenShift serving certs; clients verify against the injected service CA at /etc/pki/service-ca/ca.crt. External entry is the edge-TLS Route; nothing else is exposed. Note: Postgres has ssl=on but pg_hba is not overridden (sclorg image limitation) — plaintext to Postgres is prevented by NetworkPolicy (only PgBouncer and hook Jobs may connect, and both use verify-full).
+Postgres, Redis (TLS-only), and PgBouncer present OpenShift serving certs; clients verify against the injected service CA at /etc/pki/service-ca/ca.crt. The API also presents a serving cert (uvicorn --ssl-*), and external entry is a re-encrypt Route — the router terminates client TLS and re-encrypts to the pod, verifying it against the service CA it trusts implicitly (no destinationCACertificate needed); nothing else is exposed. Note: Postgres has ssl=on but pg_hba is not overridden (sclorg image limitation) — plaintext to Postgres is prevented by NetworkPolicy (only PgBouncer and hook Jobs may connect, and both use verify-full).
 
 ## Worker self-recycling
 `worker.maxRssMb` (default 512) — on RSS breach the worker stops claiming jobs, readiness flips to 503, in-flight jobs drain (bounded by terminationGracePeriodSeconds 50), the pod exits 0 and is replaced.

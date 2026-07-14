@@ -10,7 +10,9 @@ spec:
     kind: Service
     name: {{ include "jobprocessor.fullname" . }}-api
   port:
-    targetPort: http
+    targetPort: https
   tls:
-    termination: edge
+    # router re-encrypts to the pod's service-CA serving cert; the router
+    # trusts the service CA implicitly, so no destinationCACertificate.
+    termination: reencrypt
     insecureEdgeTerminationPolicy: Redirect

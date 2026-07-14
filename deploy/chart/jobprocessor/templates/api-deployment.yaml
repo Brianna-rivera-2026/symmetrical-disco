@@ -22,7 +22,11 @@ spec:
         - name: api
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          # image CMD already runs uvicorn app.main:app on :8000
+          # overrides the image CMD (plain-HTTP uvicorn) to serve TLS with the
+          # service-CA serving cert, so the Route can re-encrypt to the pod
+          command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000",
+                    "--ssl-certfile", "/etc/pki/serving-cert/tls.crt",
+                    "--ssl-keyfile", "/etc/pki/serving-cert/tls.key"]
           env:
             {{- include "jobprocessor.appEnv" . | nindent 12 }}
             - name: DB_POOL_SIZE
@@ -38,6 +42,7 @@ spec:
             httpGet:
               path: /ready
               port: 8000
+              scheme: HTTPS
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
@@ -45,9 +50,17 @@ spec:
             httpGet:
               path: /health
               port: 8000
+              scheme: HTTPS
             initialDelaySeconds: 15
             periodSeconds: 15
           volumeMounts:
             {{- include "jobprocessor.caVolumeMount" . | nindent 12 }}
+            - name: serving-cert
+              mountPath: /etc/pki/serving-cert
+              readOnly: true
       volumes:
         {{- include "jobprocessor.caVolume" . | nindent 8 }}
+        - name: serving-cert
+          secret:
+            secretName: {{ include "jobprocessor.fullname" . }}-api-tls
+            defaultMode: 0640
