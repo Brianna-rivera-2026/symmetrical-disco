@@ -25,6 +25,8 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["alembic", "upgrade", "head"]
+          resources:
+            {{- toYaml .Values.hooks.resources | nindent 12 }}
           env:
             - name: DB_MIGRATOR_PASSWORD
               valueFrom:

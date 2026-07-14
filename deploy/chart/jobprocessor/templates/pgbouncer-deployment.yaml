@@ -21,6 +21,8 @@ spec:
       containers:
         - name: pgbouncer
           image: {{ .Values.pgbouncer.image }}
+          resources:
+            {{- toYaml .Values.pgbouncer.resources | nindent 12 }}
           env:
             - name: DB_HOST
               value: {{ include "jobprocessor.postgresHost" . | quote }}

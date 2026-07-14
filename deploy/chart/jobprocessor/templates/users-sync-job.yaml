@@ -23,6 +23,8 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["python", "-m", "app.users.sync"]
+          resources:
+            {{- toYaml .Values.hooks.resources | nindent 12 }}
           env:
             - name: DB_APP_PASSWORD
               valueFrom:

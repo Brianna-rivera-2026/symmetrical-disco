@@ -23,6 +23,8 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["python", "-m", "app.ticker"]
+          resources:
+            {{- toYaml .Values.ticker.resources | nindent 12 }}
           env:
             {{- include "jobprocessor.appEnv" . | nindent 12 }}
             - name: DB_POOL_SIZE

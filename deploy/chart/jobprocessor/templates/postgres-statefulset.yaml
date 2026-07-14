@@ -21,6 +21,8 @@ spec:
       containers:
         - name: postgres
           image: {{ .Values.postgres.image }}
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
           env:
             - name: POSTGRESQL_USER
               value: {{ .Values.postgres.user | quote }}

@@ -6,12 +6,23 @@ image:
 api:
   replicas: 2
   dbPoolSize: 5
+  # Memory-only limits throughout: CPU limits throttle the async event loop
+  # (liveness heartbeat flaps); requests alone inform scheduling. Sized for a
+  # small local cluster (CRC) — raise for real environments.
+  resources:
+    requests: { cpu: 100m, memory: 192Mi }
+    limits: { memory: 512Mi }
 
 worker:
   replicas: 2          # used when keda.enabled=false
   dbPoolSize: 5
   concurrency: 10
   maxRssMb: 512
+  # limits.memory must stay above maxRssMb so the graceful self-recycler
+  # (drain + exit 0) always fires before the kernel OOM-killer.
+  resources:
+    requests: { cpu: 150m, memory: 256Mi }
+    limits: { memory: 768Mi }
   internetEgress:
     enabled: true      # HTTPS (443 only) to public IPs for webhook delivery
     # Cluster-internal and private ranges stay blocked even when enabled.
@@ -24,6 +35,16 @@ worker:
 
 ticker:
   dbPoolSize: 2
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 384Mi }
+
+# Short-lived Helm hook Jobs (migrate, users-sync); namespaces with a
+# ResourceQuota reject request-less pods, hooks included.
+hooks:
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 384Mi }
 
 keda:
   enabled: false
@@ -46,15 +67,24 @@ postgres:
   database: jobs
   user: jobs
   storage: 1Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 1Gi }
 
 pgbouncer:
   image: edoburu/pgbouncer:v1.23.1-p2
   defaultPoolSize: 20
   maxClientConn: 60
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 128Mi }
 
 redis:
   image: redis:7
   storage: 1Gi
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 256Mi }
 
 tls:
   appToPgbouncer: true

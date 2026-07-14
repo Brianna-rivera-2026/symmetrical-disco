@@ -21,6 +21,8 @@ spec:
       containers:
         - name: redis
           image: {{ .Values.redis.image }}
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
           command:
             - sh
             - -c

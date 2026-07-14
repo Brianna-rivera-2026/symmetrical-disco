@@ -1,0 +1,35 @@
+# Voluntary-disruption budgets for the horizontally-scaled components, so a
+# node drain (cluster upgrade) evicts replicas one at a time instead of all
+# at once. maxUnavailable (not minAvailable): with minAvailable=1 a
+# KEDA-scaled-to-1 worker would report ALLOWED DISRUPTIONS: 0 and block node
+# drains cluster-wide; maxUnavailable=1 stays satisfiable at any replica
+# count. The singletons (postgres, redis, ticker, pgbouncer) deliberately get
+# no PDB — an unsatisfiable budget on a 1-replica workload wedges drains, and
+# their recovery story is rescheduling plus the reaper/reconciler.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "jobprocessor.fullname" . }}-api
+  labels:
+    {{- include "jobprocessor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "jobprocessor.labels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "jobprocessor.fullname" . }}-worker
+  labels:
+    {{- include "jobprocessor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "jobprocessor.labels" . | nindent 6 }}
+      app.kubernetes.io/component: worker

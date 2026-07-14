@@ -21,11 +21,24 @@ spec:
     spec:
       # bounds the recycler/SIGTERM drain (spec: stuck job can't wedge the pod)
       terminationGracePeriodSeconds: 50
+      # Soft spread (ScheduleAnyway): prefer distinct nodes so one node
+      # failure can't take every replica, but never block scheduling on
+      # small/cordoned clusters. The PDB covers voluntary drains.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "jobprocessor.labels" . | nindent 14 }}
+              app.kubernetes.io/component: worker
       containers:
         - name: worker
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["python", "-m", "app.worker"]
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
           env:
             {{- include "jobprocessor.appEnv" . | nindent 12 }}
             - name: DB_POOL_SIZE

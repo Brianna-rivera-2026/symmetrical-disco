@@ -26,7 +26,6 @@ data:
     max_client_conn = {{ .Values.pgbouncer.maxClientConn }}
     default_pool_size = {{ .Values.pgbouncer.defaultPoolSize }}
     ignore_startup_parameters = extra_float_digits
-    admin_users = jobs_app
     server_tls_sslmode = verify-full
     server_tls_ca_file = /etc/pki/service-ca/ca.crt
     {{- if .Values.tls.appToPgbouncer }}

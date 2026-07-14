@@ -18,10 +18,23 @@ spec:
         app.kubernetes.io/component: api
     spec:
       terminationGracePeriodSeconds: 30
+      # Soft spread (ScheduleAnyway): prefer distinct nodes so one node
+      # failure can't take every replica, but never block scheduling on
+      # small/cordoned clusters. The PDB covers voluntary drains.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "jobprocessor.labels" . | nindent 14 }}
+              app.kubernetes.io/component: api
       containers:
         - name: api
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
           # overrides the image CMD (plain-HTTP uvicorn) to serve TLS with the
           # service-CA serving cert, so the Route can re-encrypt to the pod
           command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000",
