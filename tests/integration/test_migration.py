@@ -11,26 +11,20 @@ from app.schemas.enums import JobType
 
 async def test_jobs_table_exists_with_indexes(pg_engine):
     async with pg_engine.begin() as conn:
-
         def check_indexes(c):
             insp = inspect(c)
-            return "jobs" in insp.get_table_names() and "ix_jobs_created_at_id" in {
-                ix["name"] for ix in insp.get_indexes("jobs")
-            }
-
+            return "jobs" in insp.get_table_names() and "ix_jobs_created_at_id" in {ix["name"] for ix in insp.get_indexes("jobs")}
         result = await conn.run_sync(check_indexes)
     assert result
 
 
 async def test_priority_column_and_index(pg_engine):
     async with pg_engine.begin() as conn:
-
         def check_priority(c):
             insp = inspect(c)
             cols = {col["name"] for col in insp.get_columns("jobs")}
             index_names = {ix["name"] for ix in insp.get_indexes("jobs")}
             return "priority" in cols and "ix_jobs_priority" in index_names
-
         result = await conn.run_sync(check_priority)
     assert result
 
@@ -107,12 +101,10 @@ async def test_null_idempotency_keys_do_not_collide(db_session):
 
 async def test_status_created_at_index_exists(pg_engine):
     async with pg_engine.begin() as conn:
-
         def check_status_index(c):
             insp = inspect(c)
             index_names = {ix["name"] for ix in insp.get_indexes("jobs")}
             return "ix_jobs_status_created_at" in index_names
-
         result = await conn.run_sync(check_status_index)
     assert result
 
@@ -121,7 +113,6 @@ async def test_users_table_and_job_ownership_columns(pg_engine):
     from sqlalchemy import inspect
 
     async with pg_engine.begin() as conn:
-
         def check_ownership_schema(c):
             inspector = inspect(c)
 
