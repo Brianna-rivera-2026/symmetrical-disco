@@ -89,6 +89,32 @@ spec:
         - { protocol: TCP, port: 4317 }
     {{- end }}
 ---
+# ---------- api -> apiserver (TokenReview delegated auth) ----------
+# The apiserver runs on the host network, so pod/namespace selectors can't
+# match it. Pinning its exact IPs was tried and reverted (cluster-specific,
+# drifts -> 503 outages), so this allows 6443 to the RFC1918 ranges instead:
+# pod/service/node networks always live inside them, the ranges never
+# change, and public-internet egress on 6443 stays blocked. Without this
+# rule every TokenReview times out and authenticated requests return 503.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "jobprocessor.fullname" . }}-api-apiserver-egress
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: api
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock: { cidr: 10.0.0.0/8 }
+        - ipBlock: { cidr: 172.16.0.0/12 }
+        - ipBlock: { cidr: 192.168.0.0/16 }
+      ports:
+        - { protocol: TCP, port: 6443 }
+---
 {{- if .Values.worker.internetEgress.enabled }}
 # ---------- worker -> public internet (webhook delivery) ----------
 # ipBlock allows 0.0.0.0/0 minus private/cluster/metadata ranges, so a
