@@ -27,6 +27,7 @@ if sys.platform == "win32":
 DEFAULT_TEST_TOKEN = "tok-default"
 SECOND_TEST_TOKEN = "tok-second"
 OUTSIDER_TEST_TOKEN = "tok-outsider"  # authenticated but not in the group
+NON_UUID_UID_TEST_TOKEN = "tok-non-uuid-uid"  # authenticated, in-group, bad uid
 DEFAULT_TEST_UID = "00000000-0000-4000-8000-000000000001"
 SECOND_TEST_UID = "00000000-0000-4000-8000-000000000002"
 
@@ -45,6 +46,11 @@ TEST_TOKENS = {
         "username": "outsider",
         "uid": "00000000-0000-4000-8000-000000000003",
         "groups": ["some-other-group"],
+    },
+    NON_UUID_UID_TEST_TOKEN: {
+        "username": "weird-idp-user",
+        "uid": "not-a-uuid",
+        "groups": ["jobprocessor-users"],
     },
 }
 

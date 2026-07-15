@@ -2,7 +2,7 @@ import uuid
 
 import pytest
 
-from tests.integration.conftest import OUTSIDER_TEST_TOKEN
+from tests.integration.conftest import NON_UUID_UID_TEST_TOKEN, OUTSIDER_TEST_TOKEN
 
 EMAIL_JOB = {"type": "email", "payload": {"to": "a@b.com", "subject": "Hi"}}
 
@@ -35,6 +35,13 @@ def test_authenticated_but_wrong_group_is_403(unauth_client):
         "/jobs", headers={"Authorization": f"Bearer {OUTSIDER_TEST_TOKEN}"}
     )
     assert resp.status_code == 403
+
+
+def test_authenticated_in_group_but_non_uuid_uid_is_401(unauth_client):
+    resp = unauth_client.get(
+        "/jobs", headers={"Authorization": f"Bearer {NON_UUID_UID_TEST_TOKEN}"}
+    )
+    assert resp.status_code == 401
 
 
 def test_probes_and_stats_stay_open(unauth_client):

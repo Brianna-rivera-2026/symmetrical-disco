@@ -12,7 +12,7 @@ Idempotent (safe to re-run). Installs, via OLM:
 ## Authentication setup
 Before deploying this chart, the cluster operator must configure an identity provider (e.g., LDAP, OIDC, htpasswd) and create a group for API users:
 
-    deploy/openshift/setup-idp.sh
+    deploy/openshift/setup-idp.sh user1:password1 [user2:password2 ...]
 
 This creates a group (default: `jobprocessor-users`) and associates users with it. After setup, users authenticate via:
 

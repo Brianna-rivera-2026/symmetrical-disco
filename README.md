@@ -256,8 +256,9 @@ touching the file), then restart the `fake-tokenreview` and `api` services.
 ### OpenShift (production)
 
 Users are provisioned via the cluster's OpenShift identity provider (OAuth
-system). The API validates tokens using the TokenReview API
-(`auth.type: kubernetes_tokenreview` in the Helm chart).
+system). The API validates tokens using the TokenReview API and gates access
+on group membership (see `auth.requiredGroup` / `auth.rbac.create` in
+`deploy/chart/jobprocessor/values.yaml`).
 
 **Initial setup**, run ONCE by cluster-admin, before the first `helm install`:
 
