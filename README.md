@@ -307,9 +307,14 @@ service in `docker-compose.yml` (`WEBHOOK_ALLOWED_HOSTS`,
 [`deploy/chart/jobprocessor/values.yaml`](deploy/chart/jobprocessor/values.yaml),
 shipped as `[]` (deny all). Set them before going live:
 
-    helm upgrade jp deploy/chart/jobprocessor -n <namespace> --reuse-values \
+    helm upgrade jp deploy/chart/jobprocessor -n <namespace> --reset-then-reuse-values \
       --set security.webhookAllowedHosts='{hooks.example.com}' \
       --set security.emailAllowedDomains='{example.com}'
+
+Use `--reset-then-reuse-values` (not `--reuse-values`) on every upgrade of
+this chart: it keeps your previous `--set` overrides but re-reads the chart's
+`values.yaml` defaults, so upgrades that add new keys (e.g. `hooks.resources`)
+don't fail with nil-pointer template errors.
 
 **Gotcha:** a fresh install or an upgrade that doesn't set these leaves both
 lists empty — every email and webhook job will `422` at submission (and any

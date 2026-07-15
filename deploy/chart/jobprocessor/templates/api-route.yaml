@@ -6,6 +6,10 @@ metadata:
     {{- include "jobprocessor.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
 spec:
+  # Only the job API is public. /health, /ready and /stats stay
+  # cluster-internal: probes hit the pod directly via the kubelet, and the
+  # router answers anything outside /jobs with its own 503 (no route match).
+  path: /jobs
   to:
     kind: Service
     name: {{ include "jobprocessor.fullname" . }}-api
