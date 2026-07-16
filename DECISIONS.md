@@ -3,18 +3,19 @@
 
 ## 1. Job Pickup Strategy
 
-**Approach chosen:** One job per process, scaled horizontally via container replicas. Workers compete as a unified consumer group using Redis Streams (`XREADGROUP`).
+**Approach chosen:** Async workers — each worker process runs up to `worker_concurrency` (default 10) jobs concurrently as asyncio tasks, and scales horizontally via container replicas on top of that. Workers compete as a unified consumer group using Redis Streams (`XREADGROUP`).
 
-* **Mechanics:** Each worker process executes a blocking loop: `XREADGROUP` (requesting exactly 1 message) $\rightarrow$ claim and load job data from PostgreSQL $\rightarrow$ execute the job handler $\rightarrow$ update state in PostgreSQL $\rightarrow$ issue `XACK` to Redis. Concurrency is managed at the infrastructure layer via Docker Compose scaling (`docker compose up --scale worker=N`).
+* **Mechanics:** Each worker process runs a pull loop gated by an `asyncio.Semaphore(worker_concurrency)`: acquire a free slot $\rightarrow$ `XREADGROUP` (requesting exactly 1 message) $\rightarrow$ spawn a task in an `asyncio.TaskGroup` that claims and loads the job from PostgreSQL, executes the handler, updates state in PostgreSQL, and issues `XACK` to Redis. Each in-flight job gets its own DB session from the session factory. Shutdown exits the pull loop and lets the TaskGroup drain in-flight jobs before stopping. Further concurrency is added at the infrastructure layer via Docker Compose scaling (`docker compose up --scale worker=N`).
 
 **Why:**
 
 * **Reliable Delivery Tracking:** Redis Streams with Consumer Groups natively track message delivery state. When a worker reads a message via `XREADGROUP`, Redis assigns ownership to that specific worker and moves the message into a Pending Entries List (PEL). This guarantees that the message is explicitly assigned to exactly one worker at a time, preventing competing workers from processing the same stream item simultaneously.
-* **True Process Isolation:** A fatal crash (e.g., an unhandled C-extension exception or a catastrophic memory leak) only drops a single job container, completely isolating failures.
+* **Throughput without threads:** Handlers are I/O-bound (DB, Redis, simulated network calls), so a single event loop drives `worker_concurrency` jobs with far less overhead than one process or thread per job.
+* **Process isolation still applies at the replica level:** A fatal crash (e.g., an unhandled C-extension exception or a catastrophic memory leak) drops one worker container. The blast radius is now up to `worker_concurrency` in-flight jobs rather than one, but all of them are recovered by the reaper path (Decision #2), so the trade is bounded recovery latency for a ~10× smaller process fleet.
 
 **Trade-offs & Mitigations:**
 
-* **Resource Overhead:** Running multiple OS processes is heavier than green threads or async event loops.
+* **Shared-fate concurrency:** With `worker_concurrency` jobs on one event loop, a handler that blocks the loop (CPU-bound work, a sync call) stalls every job in that process, and a process crash takes all of its in-flight jobs down together. Acceptable because handlers are I/O-bound and crash recovery (Decision #2) covers the batch of in-flight jobs the same way it covers one.
 * **Idempotency vs. Race Conditions:** While Redis Streams guarantees exclusive delivery within the active consumer group, network disruptions or unexpected worker crashes before an `XACK` can leave messages in the PEL to be claimed later by a reaper/reconciliation process. To ensure this does not result in duplicate execution, the worker's `claim_job` phase utilizes an atomic PostgreSQL `UPDATE ... WHERE status IN ('pending', 'scheduled')` statement. Redundant claims from stream reprocessing are gracefully discarded by the worker, trading minor Redis stream bloat for absolute transactional integrity in the database.
 
 
@@ -33,13 +34,12 @@ reaped job gets the same attempt-counting and terminal-failure semantics as
 any other failure, rather than a second code path to keep in sync.
 
 **Two layers, for two kinds of "stuck":**
-- **Hung handler, process still alive:** each handler runs in a single-use
-  thread (`run_with_timeout`, `app/worker/timeout.py`) bounded by
-  `job_handler_timeout_s` (45s). Python can't forcibly kill a thread, so on
-  timeout the worker abandons it, immediately routes the job through
-  retry/backoff (`HandlerTimeout` → `schedule_retry_or_fail`), and recycles
-  its own process (`max_handler_timeouts_before_recycle`, default 1) so the
-  abandoned thread can't leak resources indefinitely.
+- **Hung handler, process still alive:** each handler task is bounded by
+  `job_handler_timeout_s` (45s) via `asyncio.wait_for`
+  (`run_with_timeout`, `app/worker/timeout.py`). On timeout the handler
+  task is natively cancelled and awaited to completion — nothing is
+  orphaned — then the worker rolls back the job's session and routes the
+  job through retry/backoff (`HandlerTimeout` → `schedule_retry_or_fail`).
 - **Actually-dead process** (crash, OOM-kill, host failure): nothing
   in-process can react, so recovery falls entirely to the ticker's reaper.
   `job_handler_timeout_s` is validated to always be `< visibility_timeout_s`
@@ -171,11 +171,22 @@ much beyond that, and see the thundering-herd trade-off below.
 - **Cooperative cancellation only works for batch jobs.** Cancellation
   (`POST /jobs/{id}/cancel`) is purely cooperative — a handler has to
   explicitly poll for it. Only `handle_batch` does. To handle individual item failures, the system adopts a Permissive Batch pattern that isolates item-level errors using internal try/except blocks, aggregates the findings into a final result JSON summary, and allows the overall parent job to transition to COMPLETED.
-- **Retry policy is global, not per job type or per submission.**
+- **Retry policy is (almost) global, not per job type or per submission.**
   `max_attempts` and the backoff schedule both come from `Settings`, the
   same for every job — there's no way to give a cheap, idempotent `webhook`
   job a more aggressive retry policy than an expensive `report` job, and no
-  `max_attempts` field on `JobSubmission` for a caller to override it.
+  `max_attempts` field on `JobSubmission` for a caller to override it. The
+  one deliberate exception: **batch jobs are submitted with
+  `max_attempts = 1`** (set at the API's `_create_and_handoff`). A
+  batch-level retry — whether from a `HandlerTimeout` on a batch too big
+  for the handler budget, or a reaper reclaim after a worker crash —
+  re-runs already-executed items from scratch, duplicating their side
+  effects; and because item failures are folded into the summary rather
+  than raised, a second attempt can only repeat work, never recover it.
+  So any batch-level failure is terminal on the first attempt. The
+  mechanism is the existing per-row `max_attempts` column, not a special
+  case in the worker, so the policy is visible to callers in the job's
+  API representation.
 
 
 ## 5. One Thing I Would Do Differently With More Time

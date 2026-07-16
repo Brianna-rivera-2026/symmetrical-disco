@@ -78,6 +78,11 @@ async def stats(
 async def _create_and_handoff(
     session, client, settings, submission, key, req_hash, user_id, user_name
 ):
+    # Batch jobs are never retried: a retry re-runs already-executed items
+    # from scratch, duplicating their side effects, and item-level failures
+    # are collected into the summary rather than raised — so a second attempt
+    # can only repeat work, never recover it.
+    max_attempts = 1 if submission.type == JobType.batch else settings.max_attempts
     scheduled_at = submission.scheduled_at
     if scheduled_at is not None and scheduled_at > datetime.now(timezone.utc):
         job = await repo.create_job(
@@ -87,7 +92,7 @@ async def _create_and_handoff(
             status=JobStatus.scheduled,
             scheduled_at=scheduled_at,
             priority=submission.priority,
-            max_attempts=settings.max_attempts,
+            max_attempts=max_attempts,
             idempotency_key=key,
             idempotency_hash=req_hash,
             trace_context=current_trace_carrier(),
@@ -103,7 +108,7 @@ async def _create_and_handoff(
             submission.type,
             submission.payload,
             priority=submission.priority,
-            max_attempts=settings.max_attempts,
+            max_attempts=max_attempts,
             idempotency_key=key,
             idempotency_hash=req_hash,
             trace_context=current_trace_carrier(),

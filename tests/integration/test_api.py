@@ -180,6 +180,68 @@ def test_job_out_exposes_attempts(client):
     assert got["max_attempts"] == 4
 
 
+def test_batch_submission_gets_single_attempt(client):
+    """Batch jobs are never retried: a retry re-runs already-executed items
+    from scratch (duplicating their side effects), so max_attempts is 1."""
+    resp = client.post(
+        "/jobs",
+        json={
+            "type": "batch",
+            "payload": {"items": [{"type": "email", "to": "a@b.com", "subject": "Hi"}]},
+        },
+    )
+    assert resp.status_code == 202
+    got = client.get(f"/jobs/{resp.json()['id']}").json()
+    assert got["max_attempts"] == 1
+
+
+async def test_failed_batch_is_not_retried(client, db_session, redis_client, pg_engine):
+    """A batch that fails (HandlerTimeout) is terminal on its first attempt:
+    no re-enqueue to a stream, no delayed retry, status goes straight to
+    failed."""
+    from uuid import UUID
+
+    from app import repository as repo
+    from app.core.db import make_session_factory
+    from app.schemas.enums import JobStatus
+    from app.worker.runner import process_job
+
+    await redis_client.flushdb()
+    resp = client.post(
+        "/jobs",
+        json={
+            "type": "batch",
+            "payload": {"items": [{"type": "email", "to": "a@b.com", "subject": "Hi"}]},
+        },
+    )
+    assert resp.status_code == 202
+    job_id = UUID(resp.json()["id"])
+    # The email item's handler sleeps ≥1s, so a 0.05s budget guarantees a
+    # HandlerTimeout on the batch.
+    settings = client.app.state.settings.model_copy(
+        update={"job_handler_timeout_s": 0.05}
+    )
+
+    outcome = await process_job(
+        db_session,
+        redis_client,
+        settings,
+        job_id,
+        session_factory=make_session_factory(pg_engine),
+    )
+
+    assert outcome.label == "timeout"
+    assert outcome.ack is True
+    db_session.expire_all()
+    job = await repo.get_job(db_session, job_id)
+    assert job.status is JobStatus.failed
+    assert job.attempts == 1
+    # No retry handoff happened: only the original submission message exists,
+    # and nothing was parked for a delayed retry.
+    assert await redis_client.xlen(settings.stream_normal) == 1
+    assert await redis_client.zcard(settings.delayed_zset) == 0
+
+
 async def test_retry_failed_job_reenqueues(client, db_session, default_user_id):
     from app import repository as repo
     from app.schemas.enums import JobType
