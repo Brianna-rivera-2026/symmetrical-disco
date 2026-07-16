@@ -51,6 +51,17 @@ curl http://localhost:8000/health
 ```
 
 ```json
+{ "status": "ok" }
+```
+
+`/health` is pure liveness — it answers `200` whenever the process is serving
+requests. Dependency checks live on `/ready`:
+
+```bash
+curl http://localhost:8000/ready
+```
+
+```json
 { "status": "ok", "checks": { "postgres": "ok", "redis": "ok" } }
 ```
 
@@ -279,8 +290,11 @@ IdP entry is only added if absent (see `deploy/openshift/setup-idp.sh` for detai
     deploy/openshift/setup-idp.sh user1:newpassword1 [user2:newpassword2 ...]
 
 **Revocation:** remove the user from the htpasswd file by re-running `setup-idp.sh`
-without that user, then invalidate any tokens by revoking them in the OAuth system
-(tokens take effect within `AUTH_CACHE_TTL_S`, default 60s).
+without that user, then invalidate any tokens by revoking them in the OAuth system.
+A revoked token stops working after `AUTH_CACHE_TTL_S` (default 60s) **plus** the
+cluster apiserver's own token-validation cache (~60s on OpenShift, not tunable from
+this app) — about 2 minutes end-to-end, measured live. Lowering `AUTH_CACHE_TTL_S`
+only shrinks the first half of that window.
 
 ## Webhook host / email domain allowlists
 
