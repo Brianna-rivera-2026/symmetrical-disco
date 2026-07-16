@@ -172,13 +172,22 @@ async def reap_stale(
                     "ticker.reap", attributes={"jobs.count": len(messages)}
                 ):
                     for message_id, fields in messages:
+                        try:
+                            job_id = UUID(fields["job_id"])
+                        except (KeyError, ValueError, TypeError):
+                            # Poison entry: ack it so it can't permanently
+                            # block recovery of the stale messages behind it.
+                            log.error(
+                                "ticker.reap_poison",
+                                extra={"stream": stream, "message_id": message_id},
+                            )
+                            await client.xack(
+                                stream, settings.consumer_group, message_id
+                            )
+                            handled += 1
+                            continue
                         await _reap_one(
-                            session,
-                            client,
-                            settings,
-                            stream,
-                            message_id,
-                            UUID(fields["job_id"]),
+                            session, client, settings, stream, message_id, job_id
                         )
                         handled += 1
             if cursor == "0-0":

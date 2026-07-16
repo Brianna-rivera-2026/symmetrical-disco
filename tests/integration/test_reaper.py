@@ -113,3 +113,33 @@ async def test_reaper_treats_cancelled_unsynced_as_ghost_no_resurrection(
         await redis_client.xpending(settings.stream_normal, settings.consumer_group)
     )["pending"] == 0
     assert await redis_client.xlen(settings.stream_normal) == 1  # no resurrection XADD
+
+
+async def test_reaper_acks_poison_entry_and_still_reaps_valid_ones(
+    db_session, redis_client, test_settings
+):
+    """A reclaimed entry with a malformed job_id must be acked and skipped —
+    not raise and permanently block recovery of the valid stale messages
+    queued behind it on the same stream."""
+    settings = test_settings.model_copy(update={"visibility_timeout_s": 0})
+    # Poison entry first so it is returned ahead of the valid one.
+    await _plant_pel(
+        redis_client, settings.consumer_group, settings.stream_normal, "not-a-uuid"
+    )
+    job = await repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}
+    )
+    await _plant_pel(
+        redis_client, settings.consumer_group, settings.stream_normal, job.id
+    )
+    await repo.claim_job(db_session, job.id)  # → processing (worker "died")
+
+    handled = await reap_stale(db_session, redis_client, settings)
+
+    assert handled == 2  # poison acked + valid job recovered
+    await db_session.refresh(job)
+    assert job.status is JobStatus.pending
+    # Both PEL entries cleared — the poison one no longer blocks the stream.
+    assert (
+        await redis_client.xpending(settings.stream_normal, settings.consumer_group)
+    )["pending"] == 0

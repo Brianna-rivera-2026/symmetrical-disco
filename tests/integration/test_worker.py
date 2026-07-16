@@ -487,3 +487,55 @@ async def test_policy_violation_fails_without_retry(
     assert job.status is JobStatus.failed
     assert job.attempts == 1  # fail_job increments once; no retry ladder beyond it
     assert job.error["type"] == "PayloadPolicyError"
+
+
+async def test_malformed_job_id_is_acked_not_raised(
+    redis_client, test_settings, pg_engine
+):
+    """A poison message (job_id not a valid UUID) must be acked and dropped,
+    not raise out of handle_message and kill the worker."""
+    for stream in test_settings.ordered_streams:
+        await ensure_group(redis_client, stream, test_settings.consumer_group)
+    await redis_client.xadd(test_settings.stream_normal, {"job_id": "not-a-uuid"})
+    batch = await _read_one(redis_client, test_settings)
+    assert batch, "expected one message"
+    stream, message_id, fields = batch[0]
+
+    outcome = await handle_message(
+        make_session_factory(pg_engine),
+        redis_client,
+        test_settings,
+        stream,
+        message_id,
+        fields,
+    )
+
+    assert outcome.label == "poison"
+    assert outcome.ack is True
+    pending = await redis_client.xpending(stream, test_settings.consumer_group)
+    assert pending["pending"] == 0
+
+
+async def test_missing_job_id_field_is_acked_not_raised(
+    redis_client, test_settings, pg_engine
+):
+    """A message with no job_id field at all is also poison — ack and drop."""
+    for stream in test_settings.ordered_streams:
+        await ensure_group(redis_client, stream, test_settings.consumer_group)
+    await redis_client.xadd(test_settings.stream_normal, {"other": "x"})
+    batch = await _read_one(redis_client, test_settings)
+    assert batch, "expected one message"
+    stream, message_id, fields = batch[0]
+
+    outcome = await handle_message(
+        make_session_factory(pg_engine),
+        redis_client,
+        test_settings,
+        stream,
+        message_id,
+        fields,
+    )
+
+    assert outcome.label == "poison"
+    pending = await redis_client.xpending(stream, test_settings.consumer_group)
+    assert pending["pending"] == 0

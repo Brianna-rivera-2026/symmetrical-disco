@@ -214,7 +214,17 @@ async def handle_message(
 ) -> Outcome:
     """Process one delivered message inside a CONSUMER span that continues
     the trace carried in the message fields (or starts a new one)."""
-    job_id = UUID(fields["job_id"])
+    try:
+        job_id = UUID(fields["job_id"])
+    except (KeyError, ValueError, TypeError):
+        # Poison message: without a valid job_id there is nothing to process
+        # or retry — ack it so it can't crash-loop the worker or wedge the PEL.
+        log.error(
+            "job.poison_message",
+            extra={"stream": stream, "message_id": message_id},
+        )
+        await ack(client, stream, settings.consumer_group, message_id)
+        return Outcome(ack=True, label="poison")
     sent_ms = int(message_id.split("-")[0])
     # Label by priority (e.g. "normal"), not the raw stream key
     # (e.g. "jobs:stream:normal"), so this joins with queue.depth's
