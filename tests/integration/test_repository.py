@@ -339,6 +339,19 @@ async def test_reset_failed_to_pending_only_from_failed(db_session):
     assert await repo.reset_failed_to_pending(db_session, job.id) is False
 
 
+async def test_reset_failed_to_pending_rejects_cancel_requested(db_session):
+    job = await repo.create_job(
+        db_session, JobType.email, {"to": "a@b.com", "subject": "Hi"}
+    )
+    await repo.claim_job(db_session, job.id)
+    assert await repo.request_cancel(db_session, job.id) is True
+    await repo.fail_job(db_session, job.id, {"type": "E", "message": "x"})
+    # A failed job carrying a stale cancel request must not be retryable.
+    assert await repo.reset_failed_to_pending(db_session, job.id) is False
+    await db_session.refresh(job)
+    assert job.status is JobStatus.failed
+
+
 async def test_init_progress_only_when_processing(db_session):
     job = await repo.create_job(db_session, JobType.batch, {"items": []})
     assert (

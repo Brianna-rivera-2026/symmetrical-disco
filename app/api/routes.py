@@ -220,7 +220,8 @@ async def retry_job(
         raise HTTPException(status_code=404, detail="job not found")
     if not await repo.reset_failed_to_pending(session, job_id):
         raise HTTPException(
-            status_code=409, detail="job is not in a terminal failed state"
+            status_code=409,
+            detail="job is not retryable (not failed, or cancel was requested)",
         )
     settings = request.app.state.settings
     await enqueue(client, settings.stream_for_priority(job.priority), str(job_id))

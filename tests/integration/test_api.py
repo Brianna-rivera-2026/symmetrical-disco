@@ -197,6 +197,23 @@ async def test_retry_failed_job_reenqueues(client, db_session, default_user_id):
     assert body["attempts"] == 0
 
 
+async def test_retry_cancel_requested_returns_409(client, db_session, default_user_id):
+    from app import repository as repo
+    from app.schemas.enums import JobType
+
+    job = await repo.create_job(
+        db_session, JobType.webhook, {"url": "https://x.test"}, user_id=default_user_id
+    )
+    await repo.claim_job(db_session, job.id)
+    await repo.request_cancel(db_session, job.id)
+    await repo.fail_job(db_session, job.id, {"type": "E", "message": "boom"})
+
+    resp = client.post(f"/jobs/{job.id}/retry")
+    assert resp.status_code == 409
+    got = client.get(f"/jobs/{job.id}").json()
+    assert got["status"] == "failed"
+
+
 def test_retry_non_failed_returns_409(client):
     resp = client.post(
         "/jobs", json={"type": "email", "payload": {"to": "a@b.com", "subject": "Hi"}}

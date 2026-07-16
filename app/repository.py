@@ -184,7 +184,14 @@ async def retry_to_scheduled(
 async def reset_failed_to_pending(session: AsyncSession, job_id: UUID) -> bool:
     res = await session.execute(
         update(Job)
-        .where(Job.id == job_id, Job.status == JobStatus.failed)
+        .where(
+            Job.id == job_id,
+            Job.status == JobStatus.failed,
+            # A stale cancel request must not survive into a retry: the worker
+            # treats any non-null cancel_requested_at as "cancel now", so a
+            # retried job would self-cancel at its first checkpoint.
+            Job.cancel_requested_at.is_(None),
+        )
         .values(
             status=JobStatus.pending,
             attempts=0,
